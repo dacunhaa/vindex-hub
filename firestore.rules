@@ -39,6 +39,15 @@ service cloud.firestore {
             || hasRole(['ceo']));
     }
 
+    // Imagens dos conteúdos (uma por documento). Só a operação interna vê e envia.
+    match /midias/{id} {
+      allow read, delete: if internal();
+      allow create: if internal()
+        && request.resource.data.conteudo is string
+        && request.resource.data.data is string
+        && request.resource.data.data.size() < 1000000;
+    }
+
     match /tarefas/{id} {
       allow read, write: if internal();
     }

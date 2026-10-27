@@ -31,6 +31,10 @@ Quem não está cadastrado vê a mensagem "Acesso não liberado".
 
 Para tirar o acesso: botão **Bloquear** na mesma tela.
 
+## Imagens (carrossel, post)
+
+Abra o conteúdo e use **Adicionar imagens**. Dá para escolher várias de uma vez. A ordem segue o nome do arquivo (slide_1, slide_2…). O Hub reduz cada imagem para caber no banco gratuito, e a CEO vê os slides na Central de aprovação. Para ver em tamanho grande, basta clicar na imagem.
+
 ## Vídeos
 
 Por enquanto o Hub não guarda arquivos de vídeo. Suba o vídeo no **Google Drive** (compartilhado como "Qualquer pessoa com o link") ou no **YouTube como "não listado"** e cole o link no campo **Link do vídeo** do conteúdo. Ele toca dentro do Hub.

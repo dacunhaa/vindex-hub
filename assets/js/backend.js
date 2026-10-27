@@ -5,7 +5,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {
-  getFirestore, collection, doc, onSnapshot, addDoc, setDoc, updateDoc, deleteDoc, getDoc, arrayUnion, query, where
+  getFirestore, collection, doc, onSnapshot, addDoc, setDoc, updateDoc, deleteDoc, getDoc, getDocs, arrayUnion, query, where
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
 const cfg = window.VINDEX_FIREBASE_CONFIG;
@@ -32,6 +32,8 @@ if (!cfg) {
       filter ? query(collection(db, col), where(filter[0], '==', filter[1])) : collection(db, col),
       (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
       onError),
+    list: (col, filter) => getDocs(query(collection(db, col), where(filter[0], '==', filter[1])))
+      .then((snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
     add: (col, data) => addDoc(collection(db, col), data).then((r) => r.id),
     set: (col, id, data) => setDoc(doc(db, col, id), data),
     update: (col, id, patch) => updateDoc(doc(db, col, id), patch),

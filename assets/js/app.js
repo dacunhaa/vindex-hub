@@ -462,6 +462,103 @@
       <div class="msg ${m.decision || ''}">${avatar(m.by)}<div class="bubble"><div class="h"><b>${esc(person(m.by).name)}</b><span>${rel(m.at)}</span>${m.decision === 'aprovado' ? '<span class="badge st st-aprovado">Aprovou</span>' : m.decision === 'ajustes' ? '<span class="badge st st-ajustes">Pediu ajustes</span>' : ''}</div>${esc(m.text)}</div></div>`).join('') || '<div class="muted" style="font-size:12.5px">Nenhum comentário ainda.</div>'}</div>`;
   }
 
+  /* ---------------- Imagens (slides do carrossel, posts) ----------------
+     Cada imagem fica comprimida num documento da coleção "midias" (plano gratuito do Firebase,
+     sem Storage). Só carregam quando alguém abre o conteúdo. */
+  const MEDIA = {};
+  function loadMedia(id, force) {
+    if (!force && MEDIA[id]) return;
+    MEDIA[id] = MEDIA[id] && MEDIA[id] !== 'loading' ? MEDIA[id] : 'loading';
+    VH.list('midias', ['conteudo', id])
+      .then((rows) => { MEDIA[id] = rows.sort((a, b) => (a.ordem || 0) - (b.ordem || 0)); paintGallery(id); })
+      .catch((e) => { console.error(e); MEDIA[id] = []; paintGallery(id); });
+  }
+  function galleryInner(id) {
+    const list = MEDIA[id];
+    if (!list || list === 'loading') return '<div class="muted" style="font-size:12.5px">Carregando imagens…</div>';
+    const ed = canEditContent();
+    if (!list.length) return `<div class="muted" style="font-size:12.5px">Nenhuma imagem.${ed ? ' Use o botão Adicionar imagens.' : ''}</div>`;
+    return `<div class="slides">${list.map((m, i) => `<figure>
+      <img src="${esc(m.data)}" alt="${esc(m.nome || 'Imagem ' + (i + 1))}" loading="lazy" data-act="img-full" data-id="${m.id}" data-content="${id}">
+      <figcaption><span class="mono">${i + 1}/${list.length}${i === 0 ? ' · clique para ampliar' : ''}</span>${ed ? `<button class="btn ghost sm danger-txt" data-act="del-img" data-id="${m.id}" data-content="${id}">${ui.confirmDelete === m.id ? 'Confirmar' : 'Remover'}</button>` : ''}</figcaption>
+    </figure>`).join('')}</div>`;
+  }
+  function galleryHTML(c) {
+    loadMedia(c.id);
+    return `<div class="gallery" data-gallery="${c.id}">${galleryInner(c.id)}</div>
+      ${canEditContent() ? `<label class="btn sm" style="margin-top:10px">${I.plus}Adicionar imagens<input type="file" accept="image/*" multiple hidden data-upload="${c.id}"></label>
+      <span class="muted" style="font-size:12px;margin-left:8px">Na ordem do nome do arquivo (ex.: slide_1, slide_2…)</span>` : ''}`;
+  }
+  function paintGallery(id) {
+    document.querySelectorAll(`[data-gallery="${id}"]`).forEach((g) => { g.innerHTML = galleryInner(id); });
+  }
+  // Reduz a imagem para caber num documento do banco (limite de 1 MB).
+  function compress(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        let w = img.naturalWidth, h = img.naturalHeight;
+        const scale = Math.min(1, 1440 / Math.max(w, h));
+        w = Math.round(w * scale); h = Math.round(h * scale);
+        for (const [q, f] of [[0.88, 1], [0.8, 1], [0.72, 0.85], [0.65, 0.7]]) {
+          const cv = document.createElement('canvas');
+          cv.width = Math.round(w * f); cv.height = Math.round(h * f);
+          const ctx = cv.getContext('2d');
+          ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+          ctx.drawImage(img, 0, 0, cv.width, cv.height);
+          const data = cv.toDataURL('image/jpeg', q);
+          if (data.length < 900000) return resolve({ data, w: cv.width, h: cv.height });
+        }
+        reject(new Error('Imagem grande demais'));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Arquivo não é uma imagem')); };
+      img.src = url;
+    });
+  }
+  async function uploadImages(id, files) {
+    const c = content(id);
+    if (!c || !files.length) return;
+    const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { numeric: true }));
+    const current = Array.isArray(MEDIA[id]) ? MEDIA[id] : [];
+    let ordem = current.reduce((m, x) => Math.max(m, x.ordem || 0), 0);
+    let ok = 0;
+    for (const f of sorted) {
+      toast(`Enviando ${f.name}…`);
+      try {
+        const r = await compress(f);
+        await VH.add('midias', { conteudo: id, ordem: ++ordem, nome: f.name, data: r.data, w: r.w, h: r.h, criadoEm: nowIso(), criadoPor: myEmail() });
+        ok++;
+      } catch (err) { toast(`Não foi possível enviar ${f.name}`, err.message); }
+    }
+    if (ok) {
+      try { await VH.push('conteudos', id, 'history', H(`${ok} imagem(ns) adicionada(s)`), { imagens: current.length + ok }); } catch (err) { fail(err); }
+      toast(`${ok} imagem(ns) enviada(s)`);
+    }
+    loadMedia(id, true);
+  }
+  function fullImage(contentId, mediaId) {
+    const list = Array.isArray(MEDIA[contentId]) ? MEDIA[contentId] : [];
+    const i = list.findIndex((m) => m.id === mediaId);
+    if (i < 0) return;
+    const prevLayer = document.getElementById('lightbox');
+    if (prevLayer) prevLayer.remove();
+    const box = document.createElement('div');
+    box.id = 'lightbox'; box.className = 'lightbox';
+    box.innerHTML = `<img src="${esc(list[i].data)}" alt="">
+      <div class="lb-bar"><span class="mono">${i + 1}/${list.length}</span>
+      ${i > 0 ? `<button class="btn sm" data-lb="${list[i - 1].id}">← Anterior</button>` : ''}
+      ${i < list.length - 1 ? `<button class="btn sm" data-lb="${list[i + 1].id}">Próxima →</button>` : ''}
+      <button class="btn sm" data-lb="close">Fechar</button></div>`;
+    box.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-lb]');
+      if (t) { e.stopPropagation(); if (t.dataset.lb === 'close') box.remove(); else fullImage(contentId, t.dataset.lb); return; }
+      if (e.target === box) box.remove();
+    });
+    document.body.appendChild(box);
+  }
+
   function pageApproval() {
     const lists = approvalLists();
     const tab = ui.approval.tab;
@@ -479,7 +576,7 @@
           ${list.map((x) => `<div class="qitem ${x.id === ui.approval.selected ? 'on' : ''}" data-act="ap-select" data-id="${x.id}" tabindex="0">
             <div class="mono muted" style="font-size:11px">${code(x)} · v${x.version || 1}</div>
             <div class="t">${esc(x.title)}</div>
-            <div class="m"><span class="badge fmt">${esc(x.format)}</span>${x.video ? '<span class="badge">▶ vídeo</span>' : '<span class="badge">sem vídeo</span>'}${dueTag(x.due, tab === 'aprovados')}</div>
+            <div class="m"><span class="badge fmt">${esc(x.format)}</span>${x.video ? '<span class="badge">▶ vídeo</span>' : ''}${x.imagens ? `<span class="badge">${x.imagens} imagem(ns)</span>` : ''}${!x.video && !x.imagens ? '<span class="badge">sem mídia</span>' : ''}${dueTag(x.due, tab === 'aprovados')}</div>
           </div>`).join('') || '<div class="empty" style="margin:0 12px 12px">Nenhum conteúdo nesta lista.</div>'}
         </div>
       </aside>
@@ -491,8 +588,8 @@
         </div>
         <div class="review-body">
           <div class="review-main">
-            <p class="section-t">Vídeo</p>
-            ${playerHTML(c)}
+            ${c.imagens || !c.video ? `<p class="section-t">Imagens</p>${galleryHTML(c)}` : ''}
+            ${c.video || !c.imagens ? `<p class="section-t"${c.imagens || !c.video ? ' style="margin-top:20px"' : ''}>Vídeo</p>${playerHTML(c)}` : ''}
             <p class="section-t" style="margin-top:20px">Roteiro · versão ${c.version || 1}</p>
             <div class="script">${esc(c.script) || '<span class="muted">Roteiro ainda não escrito.</span>'}</div>
             ${c.caption ? `<p class="section-t" style="margin-top:20px">Legenda</p><div class="script">${esc(c.caption)}</div>` : ''}
@@ -754,6 +851,7 @@
           <dt>Pilar</dt><dd><select class="input" data-content-field="pillar" data-id="${c.id}" ${dis}>${options(K.PILLARS, c.pillar, '—')}</select></dd>
           <dt>Link do vídeo</dt><dd><input type="url" class="input" data-content-field="video" data-id="${c.id}" value="${esc(c.video || '')}" placeholder="Link do Google Drive ou YouTube" ${dis}></dd>
         </dl>
+        <div><p class="section-t">Imagens</p>${galleryHTML(c)}</div>
         <div><p class="section-t">Roteiro</p>
           ${ed ? `<textarea class="input" id="ed-script" rows="8">${esc(c.script || '')}</textarea>` : `<div class="script">${esc(c.script) || '<span class="muted">Ainda não escrito.</span>'}</div>`}</div>
         <div><p class="section-t">Legenda do post</p>
@@ -898,7 +996,7 @@
   function approvalSig() {
     const c = content(ui.approval.selected);
     const l = approvalLists();
-    return [ui.approval.tab, ui.approval.selected, c && c.stage, c && c.version, c && c.video, c && c.script, c && c.caption,
+    return [ui.approval.tab, ui.approval.selected, c && c.stage, c && c.version, c && c.video, c && c.script, c && c.caption, c && c.imagens,
       l.aguardando.length, l.ajustes.length, l.aprovados.length].join('|');
   }
   function scheduleRender() {
@@ -908,7 +1006,7 @@
       pending = false;
       const onApproval = S.status === 'app' && role() !== 'cliente' && currentRoute().id === 'aprovacoes' && !document.getElementById('layer');
       const sig = onApproval ? approvalSig() : '';
-      if (onApproval && sig === lastApprovalSig && document.querySelector('.review-main .player')) { refreshSideOnly(); return; }
+      if (onApproval && sig === lastApprovalSig && document.querySelector('.review-main .player, .review-main .gallery')) { refreshSideOnly(); return; }
       lastApprovalSig = sig;
       render();
       refreshLayer();
@@ -1104,7 +1202,10 @@
       case 'del-content': case 'del-task': case 'del-lib': {
         if (ui.confirmDelete !== id) { ui.confirmDelete = id; el.textContent = 'Clique de novo para excluir'; return; }
         const col = { 'del-content': 'conteudos', 'del-task': 'tarefas', 'del-lib': 'biblioteca' }[act];
-        try { await VH.remove(col, id); closeLayer(); toast('Excluído'); } catch (err) { fail(err); }
+        try {
+          if (col === 'conteudos') { const imgs = await VH.list('midias', ['conteudo', id]); await Promise.all(imgs.map((m) => VH.remove('midias', m.id))); delete MEDIA[id]; }
+          await VH.remove(col, id); closeLayer(); toast('Excluído');
+        } catch (err) { fail(err); }
         break;
       }
       case 'clear-kanban': ui.kanban = { q: '', owner: '', format: '', channel: '', late: false }; render(); break;
@@ -1156,6 +1257,20 @@
       case 'portal-tab': ui.portal.tab = id; render(); break;
       case 'portal-cat': ui.portal.cat = id; render(); break;
       case 'watch': watchModal(id); break;
+      case 'img-full': fullImage(el.dataset.content, id); break;
+      case 'del-img': {
+        const cid = el.dataset.content;
+        if (ui.confirmDelete !== id) { ui.confirmDelete = id; el.textContent = 'Confirmar'; return; }
+        ui.confirmDelete = null;
+        try {
+          await VH.remove('midias', id);
+          const left = (Array.isArray(MEDIA[cid]) ? MEDIA[cid] : []).filter((m) => m.id !== id);
+          MEDIA[cid] = left; paintGallery(cid);
+          await VH.push('conteudos', cid, 'history', H('Imagem removida'), { imagens: left.length });
+          toast('Imagem removida');
+        } catch (err) { fail(err); }
+        break;
+      }
       default: break;
     }
   });
@@ -1170,6 +1285,11 @@
     if (t.dataset.filter) {
       if (t.type === 'checkbox') setFilter(t.dataset.filter, t.checked);
       else if (t.tagName === 'SELECT') setFilter(t.dataset.filter, t.value);
+      return;
+    }
+    if (t.dataset.upload) {
+      const files = [...t.files]; t.value = '';
+      await uploadImages(t.dataset.upload, files);
       return;
     }
     if (t.dataset.taskStatus) {
@@ -1227,7 +1347,7 @@
   });
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeLayer();
+    if (e.key === 'Escape') { const lb = document.getElementById('lightbox'); if (lb) lb.remove(); else closeLayer(); }
     if (e.key === 'Enter' && e.target.matches('.kpi, .row, .qitem, .kcard')) e.target.click();
     if (e.key === 'Enter' && e.target.id === 'd-comment') { const b = document.querySelector('[data-act="d-comment"]'); if (b) b.click(); }
   });
