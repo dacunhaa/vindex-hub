@@ -1,16 +1,14 @@
 /*
-  Vindex Hub — protótipo navegável.
-  IMPORTANTE: não há servidor, login nem banco aqui. Tudo roda no navegador e as
-  alterações ficam salvas só neste navegador (localStorage). Ver ARQUITETURA.md.
+  Vindex Hub — aplicação.
+  Login com Google e dados compartilhados no Firebase (ver backend.js).
+  O que cada perfil pode ver e alterar é garantido pelas regras do banco (firestore.rules);
+  esconder botões aqui é só conforto visual.
 */
 (function () {
   'use strict';
 
-  const SEED = window.VINDEX_SEED;
-  const STORE_KEY = 'vindexhub.demo.v1';
+  const K = window.VINDEX_CONST;
   const DAY = 864e5;
-  const DONE_STAGES = ['publicado'];
-  const READY_STAGES = ['aprovado', 'agendado', 'publicado'];
   const NEXT_STEP = {
     pauta: 'Escrever o roteiro',
     roteiro: 'Finalizar roteiro e marcar gravação',
@@ -23,25 +21,23 @@
     agendado: 'Publicar na data marcada',
     publicado: 'Acompanhar resultados'
   };
-  const PROFILES = {
-    equipe: { label: 'Equipe', person: 'marina' },
-    ceo: { label: 'CEO', person: 'ceo' },
-    cliente: { label: 'Cliente', person: null }
-  };
-  const CLIENT_NAME = 'Loja Aurora';
+  const READY_STAGES = ['aprovado', 'agendado', 'publicado'];
+  const STATUSES = ['A fazer', 'Em andamento', 'Bloqueada', 'Concluída'];
+  const PRIORITIES = ['Alta', 'Média', 'Baixa'];
+  const COLORS = ['#1F56FF', '#6B4CE6', '#0E9F8A', '#C9721C', '#D43F8D', '#2F3C8F', '#0A0F1F', '#4D7C0F'];
 
   /* ---------------- Datas ---------------- */
   const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const TODAY = startOfDay(new Date());
+  let TODAY = startOfDay(new Date());
   const pad = (n) => String(n).padStart(2, '0');
   const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  const parse = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+  const parse = (s) => { const [y, m, d] = String(s).slice(0, 10).split('-').map(Number); return new Date(y, m - 1, d); };
   const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
   const offset = (n) => iso(addDays(TODAY, n));
   const diff = (s) => Math.round((parse(s) - TODAY) / DAY);
   const WD = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
   const MONTHS = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
-  const fmt = (s) => { const d = parse(s); return `${WD[d.getDay()]}, ${pad(d.getDate())}/${pad(d.getMonth() + 1)}`; };
+  const fmt = (s) => { if (!s) return '—'; const d = parse(s); return `${WD[d.getDay()]}, ${pad(d.getDate())}/${pad(d.getMonth() + 1)}`; };
   const rel = (s) => {
     const n = diff(s);
     if (n === 0) return 'hoje';
@@ -49,62 +45,53 @@
     if (n === -1) return 'ontem';
     return n > 0 ? `em ${n} dias` : `há ${-n} dias`;
   };
+  const nowIso = () => new Date().toISOString();
 
   /* ---------------- Estado ---------------- */
-  function freshState() {
-    const contents = SEED.CONTENTS.map((c) => ({
-      id: c.id, title: c.title, format: c.format, channel: c.channel, stage: c.stage, owner: c.owner,
-      due: offset(c.due), publish: offset(c.publish), pillar: c.pillar, video: c.video || null,
-      version: c.version || 1, script: c.script || '',
-      comments: c.comments.map((m) => ({ by: m.by, date: offset(m.d), text: m.text, decision: m.decision || null })),
-      history: [{ date: offset(Math.min(c.publish, c.due) - 12), text: 'Pauta criada' }]
-        .concat(c.stage !== 'pauta' ? [{ date: offset(Math.min(c.due, 0) - 1), text: `Movido para ${stageLabel(c.stage)}` }] : [])
-    }));
-    const tasks = SEED.TASKS.map((t) => ({ ...t, due: offset(t.due), ceo: !!t.ceo, content: t.content || null, note: t.note || '' }));
-    return { v: 1, seededOn: iso(TODAY), profile: 'equipe', contents, tasks, watched: ['L-1'], seq: { c: 121, t: 16 } };
-  }
-
-  // Desloca todas as datas para o protótipo continuar "atual" em outro dia.
-  function shiftDates(st, days) {
-    const sh = (s) => iso(addDays(parse(s), days));
-    st.contents.forEach((c) => {
-      c.due = sh(c.due); c.publish = sh(c.publish);
-      c.comments.forEach((m) => { m.date = sh(m.date); });
-      c.history.forEach((h) => { h.date = sh(h.date); });
-    });
-    st.tasks.forEach((t) => { t.due = sh(t.due); });
-    st.seededOn = iso(TODAY);
-  }
-
-  function load() {
-    try {
-      const raw = localStorage.getItem(STORE_KEY);
-      if (!raw) return null;
-      const st = JSON.parse(raw);
-      if (st.v !== 1) return null;
-      const delta = Math.round((TODAY - parse(st.seededOn)) / DAY);
-      if (delta) shiftDates(st, delta);
-      return st;
-    } catch (e) { return null; }
-  }
-  function save() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* navegador sem armazenamento: segue só em memória */ }
-  }
+  const S = {
+    status: 'loading', // loading | config | offline | login | denied | app
+    authUser: null, me: null,
+    users: [], contents: [], tasks: [], library: [],
+    loaded: {}, unsubs: [], error: ''
+  };
+  const ui = {
+    kanban: { q: '', owner: '', format: '', channel: '', late: false },
+    tasks: { q: '', owner: '', status: '', priority: '', ceo: false, late: false, hideDone: true },
+    cal: { month: TODAY.getMonth(), year: TODAY.getFullYear(), owner: '', format: '', stage: '', view: 'mes' },
+    approval: { tab: 'aguardando', selected: null },
+    portal: { tab: 'videos', cat: '' },
+    navOpen: false, confirmDelete: null
+  };
 
   /* ---------------- Utilidades ---------------- */
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-  const person = (id) => SEED.PEOPLE.find((p) => p.id === id) || { id, name: id, initials: '?', color: '#999', role: '' };
-  const stageLabel = (id) => (SEED.STAGES.find((s) => s.id === id) || {}).label || id;
-  const content = (id) => state.contents.find((c) => c.id === id);
-  const me = () => PROFILES[state.profile].person;
-  const isCEO = () => state.profile === 'ceo';
+  const role = () => (S.me ? S.me.papel : null);
+  const myEmail = () => (S.authUser ? S.authUser.email.toLowerCase() : '');
+  const isCEO = () => role() === 'ceo';
+  const canManageAccess = () => ['admin', 'ceo'].includes(role());
+  const canEditContent = () => ['admin', 'equipe'].includes(role());
+  const roleLabel = (r) => (K.ROLES.find((x) => x.id === r) || {}).label || r;
+  const stageLabel = (id) => (K.STAGES.find((s) => s.id === id) || {}).label || id;
+  const content = (id) => S.contents.find((c) => c.id === id);
+  const code = (c) => 'C-' + c.id.slice(0, 4).toUpperCase();
+  const team = () => S.users.filter((u) => u.ativo && u.papel !== 'cliente').sort((a, b) => a.nome.localeCompare(b.nome));
+  const ceoEmail = () => (S.users.find((u) => u.papel === 'ceo' && u.ativo) || {}).id || '';
+  function colorFor(s) { let h = 0; for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return COLORS[h % COLORS.length]; }
+  function person(email) {
+    const u = S.users.find((x) => x.id === email);
+    const nome = u ? u.nome : (email ? email.split('@')[0] : 'Sem responsável');
+    const parts = nome.trim().split(/\s+/);
+    const initials = (u && u.papel === 'ceo') ? 'CEO' : ((parts[0] || '?')[0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
+    return { id: email, name: nome, initials, color: email ? colorFor(email) : '#9AA0AE', role: u ? roleLabel(u.papel) : '' };
+  }
   const avatar = (id, cls = '') => { const p = person(id); return `<span class="avatar ${cls}" style="background:${p.color}" title="${esc(p.name)}">${esc(p.initials)}</span>`; };
   const who = (id, sub) => { const p = person(id); return `<span class="who">${avatar(id)}<span style="min-width:0"><div class="n">${esc(p.name)}</div>${sub ? `<div class="r">${esc(sub)}</div>` : ''}</span></span>`; };
   const stageBadge = (id) => `<span class="badge st st-${id}"><span class="dot"></span>${esc(stageLabel(id))}</span>`;
-  const nextOwner = (c) => (c.stage === 'aguardando_aprovacao' ? 'ceo' : c.owner);
-  const contentLate = (c) => !['publicado', 'agendado', 'aprovado'].includes(c.stage) && diff(c.due) < 0;
-  const taskLate = (t) => t.status !== 'Concluída' && diff(t.due) < 0;
+  const nextOwner = (c) => (c.stage === 'aguardando_aprovacao' ? (ceoEmail() || c.owner) : c.owner);
+  const contentLate = (c) => c.due && !['publicado', 'agendado', 'aprovado'].includes(c.stage) && diff(c.due) < 0;
+  const taskLate = (t) => t.due && t.status !== 'Concluída' && diff(t.due) < 0;
   const dueTag = (s, done) => {
+    if (!s) return '<span class="muted">sem prazo</span>';
     if (done) return `<span class="mono muted">${fmt(s)}</span>`;
     const n = diff(s);
     if (n < 0) return `<span class="badge late">Atrasado ${-n}d</span>`;
@@ -114,18 +101,27 @@
   const prioClass = (p) => ({ Alta: 'p-alta', 'Média': 'p-media', Baixa: 'p-baixa' }[p]);
   const options = (list, sel, all) => (all ? `<option value="">${all}</option>` : '') +
     list.map((o) => { const v = typeof o === 'string' ? o : o.value; const l = typeof o === 'string' ? o : o.label; return `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(l)}</option>`; }).join('');
-  const peopleOpts = (sel, all) => options(SEED.PEOPLE.map((p) => ({ value: p.id, label: p.name + (p.id === 'ceo' ? ' (CEO)' : '') })), sel, all);
+  const peopleOpts = (sel, all) => options(team().map((p) => ({ value: p.id, label: p.nome + (p.papel === 'ceo' ? ' (CEO)' : '') })), sel, all);
+  const safeUrl = (u) => { try { const x = new URL(String(u).trim()); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch (e) { return ''; } };
 
-  let state = load() || freshState();
-  const ui = {
-    kanban: { q: '', owner: '', format: '', channel: '', late: false },
-    tasks: { q: '', owner: '', status: '', priority: '', ceo: false, late: false, hideDone: true },
-    cal: { month: TODAY.getMonth(), year: TODAY.getFullYear(), owner: '', format: '', stage: '', view: 'mes' },
-    approval: { tab: 'aguardando', selected: null },
-    portal: { tab: 'videos', cat: '' },
-    localVideo: {},
-    navOpen: false
-  };
+  // Converte links do YouTube / Google Drive em players que tocam dentro do Hub.
+  function media(u) {
+    const url = safeUrl(u);
+    if (!url) return null;
+    const x = new URL(url);
+    const host = x.hostname.replace(/^www\.|^m\./, '');
+    if (host === 'youtu.be' || host === 'youtube.com') {
+      const id = host === 'youtu.be' ? x.pathname.slice(1) : (x.searchParams.get('v') || x.pathname.split('/').filter(Boolean).pop());
+      if (id) return { type: 'iframe', src: `https://www.youtube.com/embed/${encodeURIComponent(id)}` };
+    }
+    if (host === 'drive.google.com') {
+      const m = x.pathname.match(/\/d\/([^/]+)/);
+      const id = m ? m[1] : x.searchParams.get('id');
+      if (id) return { type: 'iframe', src: `https://drive.google.com/file/d/${encodeURIComponent(id)}/preview` };
+    }
+    if (/\.(mp4|webm|mov|m4v)$/i.test(x.pathname)) return { type: 'video', src: url };
+    return { type: 'link', src: url };
+  }
 
   const I = {
     dash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>',
@@ -134,6 +130,7 @@
     cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16.5" rx="2"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/></svg>',
     tasks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 6 2 2 4-4M3 14l2 2 4-4M13 6h8M13 14h8M13 20h8"/></svg>',
     clients: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="m10 8.5 4.5 2.5L10 13.5z"/><path d="M8 21h8"/></svg>',
+    users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14.8c1.9.8 3.1 2.6 3.5 5.2"/></svg>',
     plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
     x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
     play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>',
@@ -143,78 +140,86 @@
     menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>',
     arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
     lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10.5" width="16" height="10.5" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg>',
-    down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
+    link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>',
     chevL: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 6-6 6 6 6"/></svg>',
     chevR: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
-    flag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>'
+    flag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>',
+    google: '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.4h6.5a5.6 5.6 0 0 1-2.4 3.7v3h3.9c2.2-2.1 3.5-5.2 3.5-8.8z"/><path fill="#34A853" d="M12 24c3.2 0 6-1.1 8-2.9l-3.9-3c-1.1.7-2.5 1.2-4.1 1.2-3.1 0-5.8-2.1-6.7-5H1.3v3.1A12 12 0 0 0 12 24z"/><path fill="#FBBC05" d="M5.3 14.3a7.2 7.2 0 0 1 0-4.6V6.6H1.3a12 12 0 0 0 0 10.8z"/><path fill="#EA4335" d="M12 4.8c1.8 0 3.4.6 4.6 1.8l3.4-3.4A12 12 0 0 0 1.3 6.6l4 3.1c.9-2.9 3.6-4.9 6.7-4.9z"/></svg>'
   };
 
   let toastTimer;
-  function toast(msg, sub = 'salvo só neste navegador') {
+  function toast(msg, sub = '') {
     const el = document.getElementById('toast');
     el.innerHTML = `<span>${esc(msg)}</span>${sub ? `<small>${esc(sub)}</small>` : ''}`;
     el.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove('show'), 2800);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
+  }
+  function fail(err) {
+    console.error(err);
+    const denied = err && /permission/i.test(String(err.code || err.message));
+    toast(denied ? 'Sem permissão para essa ação' : 'Não foi possível salvar', denied ? 'regra de acesso' : 'verifique a internet');
   }
 
-  /* ---------------- Ações sobre os dados ---------------- */
-  function moveStage(id, stage, opts = {}) {
+  /* ---------------- Escrita no banco ---------------- */
+  const H = (text) => ({ at: nowIso(), by: myEmail(), text });
+
+  async function moveStage(id, stage) {
     const c = content(id);
     if (!c || c.stage === stage) return false;
-    if (stage === 'aprovado' && !isCEO() && !opts.force) {
-      toast('Só a CEO pode aprovar. Use a Central de aprovação.', 'regra de permissão');
-      return false;
-    }
-    if (stage === 'aguardando_aprovacao' && c.stage === 'ajustes') c.version += 1;
-    c.stage = stage;
-    c.history.push({ date: iso(TODAY), text: `Movido para ${stageLabel(stage)} por ${person(me()).name}` });
-    save();
-    return true;
+    if (stage === 'aprovado' && !isCEO()) { toast('Só a CEO pode aprovar. Use a Central de aprovação.', 'regra de permissão'); return false; }
+    const patch = { stage };
+    if (stage === 'aguardando_aprovacao' && c.stage === 'ajustes') patch.version = (c.version || 1) + 1;
+    try { await VH.push('conteudos', id, 'history', H(`Movido para ${stageLabel(stage)}`), patch); return true; } catch (e) { fail(e); return false; }
   }
 
-  function decide(id, decision, text) {
+  async function decide(id, decision, text) {
     const c = content(id);
-    c.comments.push({ by: 'ceo', date: iso(TODAY), text: text || 'Aprovado.', decision });
-    c.stage = decision === 'aprovado' ? 'aprovado' : 'ajustes';
-    c.history.push({ date: iso(TODAY), text: decision === 'aprovado' ? `Versão ${c.version} aprovada pela CEO` : `CEO pediu ajustes na versão ${c.version}` });
-    state.tasks.filter((t) => t.content === id && t.ceo && t.status !== 'Concluída').forEach((t) => { t.status = 'Concluída'; });
-    save();
+    const comment = { at: nowIso(), by: myEmail(), text: text || 'Aprovado.', decision };
+    const hist = H(decision === 'aprovado' ? `Versão ${c.version || 1} aprovada pela CEO` : `CEO pediu ajustes na versão ${c.version || 1}`);
+    try {
+      await VH.update('conteudos', id, {
+        stage: decision === 'aprovado' ? 'aprovado' : 'ajustes',
+        comments: (c.comments || []).concat([comment]),
+        history: (c.history || []).concat([hist])
+      });
+      await Promise.all(S.tasks.filter((t) => t.content === id && t.ceo && t.status !== 'Concluída')
+        .map((t) => VH.update('tarefas', t.id, { status: 'Concluída' })));
+      return true;
+    } catch (e) { fail(e); return false; }
   }
 
-  function addComment(id, text) {
-    const c = content(id);
-    c.comments.push({ by: me(), date: iso(TODAY), text, decision: null });
-    save();
-  }
+  const addComment = (id, text) => VH.push('conteudos', id, 'comments', { at: nowIso(), by: myEmail(), text, decision: null }).catch(fail);
 
   /* ---------------- Contadores ---------------- */
   function counts() {
-    const approvals = state.contents.filter((c) => c.stage === 'aguardando_aprovacao').length;
-    const lateTasks = state.tasks.filter(taskLate).length;
-    const ceoTasks = state.tasks.filter((t) => t.ceo && t.status !== 'Concluída').length;
+    const approvals = S.contents.filter((c) => c.stage === 'aguardando_aprovacao').length;
+    const lateTasks = S.tasks.filter(taskLate).length;
+    const ceoTasks = S.tasks.filter((t) => t.ceo && t.status !== 'Concluída').length;
     return { approvals, lateTasks, ceoTasks };
   }
 
-  /* ---------------- Estrutura (shell) ---------------- */
+  /* ---------------- Estrutura ---------------- */
   const ROUTES = [
     { id: 'dashboard', label: 'Dashboard', icon: 'dash', render: pageDashboard },
     { id: 'producao', label: 'Produção', icon: 'board', render: pageKanban },
     { id: 'aprovacoes', label: 'Central de aprovação', icon: 'check', render: pageApproval },
     { id: 'calendario', label: 'Calendário editorial', icon: 'cal', render: pageCalendar },
     { id: 'tarefas', label: 'Tarefas', icon: 'tasks', render: pageTasks },
-    { id: 'clientes', label: 'Área de clientes', icon: 'clients', render: pageClientsPreview }
+    { id: 'clientes', label: 'Área de clientes', icon: 'clients', render: pageClients },
+    { id: 'acessos', label: 'Acessos', icon: 'users', render: pageAccess, only: canManageAccess }
   ];
-
   function currentRoute() {
     const h = (location.hash || '').replace(/^#\/?/, '').split('?')[0];
-    return ROUTES.find((r) => r.id === h) || ROUTES[0];
+    const r = ROUTES.find((x) => x.id === h && (!x.only || x.only()));
+    return r || ROUTES[0];
   }
 
   function shell(route) {
     const n = counts();
     const badge = { aprovacoes: n.approvals ? `<span class="count">${n.approvals}</span>` : '', tarefas: n.lateTasks ? `<span class="count alert" title="tarefas atrasadas">${n.lateTasks}</span>` : '' };
     const link = (r) => `<a href="#/${r.id}" class="${r.id === route.id ? 'active' : ''}">${I[r.icon]}<span>${r.label}</span>${badge[r.id] || ''}</a>`;
+    const meP = person(myEmail());
     return `
     <div class="shell ${ui.navOpen ? 'nav-open' : ''}">
       <aside class="sidebar">
@@ -227,44 +232,45 @@
           ${ROUTES.slice(0, 5).map(link).join('')}
           <div class="nav-label">Clientes</div>
           ${link(ROUTES[5])}
+          ${canManageAccess() ? `<div class="nav-label">Administração</div>${link(ROUTES[6])}` : ''}
         </nav>
         <div class="bars"><span></span><span></span><span></span></div>
-        <div class="side-foot">@vindex.ecomm<br>protótipo v1</div>
+        <div class="side-foot">@vindex.ecomm</div>
       </aside>
       <div class="main">
         <header class="topbar">
           <button class="btn ghost menu-btn" data-act="nav" aria-label="Abrir menu">${I.menu}</button>
-          <button class="demo-pill" data-act="about" title="O que é real e o que é demonstração"><i></i>Protótipo · dados fictícios</button>
+          <span class="live-pill"><i></i>Dados sincronizados</span>
           <span class="spacer"></span>
-          ${viewAs()}
+          ${userChip(meP)}
         </header>
         <main class="page" id="page">${route.render()}</main>
       </div>
     </div>`;
   }
 
-  function viewAs() {
-    return `<div class="viewas"><label>Visualizar como</label><div class="seg" role="group" aria-label="Visualizar como (demonstração, não é login)">
-      ${Object.entries(PROFILES).map(([k, p]) => `<button data-act="profile" data-id="${k}" class="${state.profile === k ? 'on' : ''}">${p.label}</button>`).join('')}
-    </div></div>`;
+  function userChip(meP) {
+    return `<div class="userchip">${avatar(myEmail())}<div class="uc-txt"><b>${esc(meP.name)}</b><span>${esc(roleLabel(role()))}</span></div>
+      <button class="btn sm" data-act="logout">Sair</button></div>`;
   }
 
   function head(eyebrow, title, desc, actions = '') {
     return `<div class="page-head"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1>${desc ? `<p>${desc}</p>` : ''}</div>${actions ? `<div class="actions">${actions}</div>` : ''}</div>`;
   }
+  const newContentBtn = () => (canEditContent() ? `<button class="btn primary" data-act="new-content">${I.plus}Novo conteúdo</button>` : '');
 
   /* ---------------- 1. Dashboard ---------------- */
   function attentionItems() {
     const items = [];
-    state.contents.forEach((c) => {
-      if (c.stage === 'aguardando_aprovacao') items.push({ who: 'ceo', title: c.title, step: 'Aprovar ou pedir ajustes', date: c.due, tag: stageBadge(c.stage), act: 'review', id: c.id });
+    S.contents.forEach((c) => {
+      if (c.stage === 'aguardando_aprovacao') items.push({ who: nextOwner(c), ceo: true, title: c.title, step: 'Aprovar ou pedir ajustes', date: c.due, tag: stageBadge(c.stage), act: 'review', id: c.id });
       else if (c.stage === 'ajustes') items.push({ who: c.owner, title: c.title, step: 'Aplicar ajustes pedidos pela CEO', date: c.due, tag: stageBadge(c.stage), act: 'content', id: c.id });
       else if (contentLate(c)) items.push({ who: c.owner, title: c.title, step: NEXT_STEP[c.stage], date: c.due, tag: stageBadge(c.stage), act: 'content', id: c.id });
     });
-    state.tasks.filter(taskLate).forEach((t) => items.push({ who: t.owner, title: t.title, step: t.status === 'Bloqueada' ? `Bloqueada: ${t.note || 'sem motivo'}` : 'Tarefa atrasada', date: t.due, tag: '<span class="badge">Tarefa</span>', act: 'task', id: t.id, ceo: t.ceo }));
+    S.tasks.filter(taskLate).forEach((t) => items.push({ who: t.owner, title: t.title, step: t.status === 'Bloqueada' ? `Bloqueada${t.note ? ': ' + t.note : ''}` : 'Tarefa atrasada', date: t.due, tag: '<span class="badge">Tarefa</span>', act: 'task', id: t.id, ceo: t.ceo }));
     items.sort((a, b) => {
-      if (isCEO()) { const ca = a.who === 'ceo' ? 0 : 1; const cb = b.who === 'ceo' ? 0 : 1; if (ca !== cb) return ca - cb; }
-      return a.date.localeCompare(b.date);
+      if (isCEO()) { const ca = a.ceo ? 0 : 1; const cb = b.ceo ? 0 : 1; if (ca !== cb) return ca - cb; }
+      return String(a.date || '9').localeCompare(String(b.date || '9'));
     });
     return items;
   }
@@ -273,39 +279,40 @@
     const n = counts();
     const mon = addDays(TODAY, -((TODAY.getDay() + 6) % 7));
     const sun = addDays(mon, 6);
-    const inWeek = (s) => parse(s) >= mon && parse(s) <= sun;
-    const week = state.contents.filter((c) => inWeek(c.publish));
+    const inWeek = (s) => s && parse(s) >= mon && parse(s) <= sun;
+    const week = S.contents.filter((c) => inWeek(c.publish));
     const weekReady = week.filter((c) => READY_STAGES.includes(c.stage)).length;
-    const pending = state.contents.filter((c) => !DONE_STAGES.includes(c.stage) && c.stage !== 'agendado').length;
+    const pending = S.contents.filter((c) => !['publicado', 'agendado'].includes(c.stage)).length;
     const att = attentionItems();
     const hour = new Date().getHours();
     const hello = hour < 12 ? 'Bom dia' : hour < 18 ? 'Boa tarde' : 'Boa noite';
-    const meP = person(me());
-    const mine = att.filter((a) => a.who === me());
+    const meP = person(myEmail());
+    const mine = att.filter((a) => a.who === myEmail());
     const first = mine[0] || att[0];
-    const todayTasks = state.tasks.filter((t) => t.status !== 'Concluída' && diff(t.due) === 0).length;
-    const summary = isCEO()
-      ? `Você tem <b>${n.approvals} ${n.approvals === 1 ? 'aprovação' : 'aprovações'}</b> e <b>${n.ceoTasks} ${n.ceoTasks === 1 ? 'tarefa' : 'tarefas'}</b> esperando sua decisão. O resto da operação está com a equipe.`
-      : `A equipe tem <b>${todayTasks} tarefas para hoje</b>, <b>${n.lateTasks} atrasadas</b> e <b>${n.approvals} conteúdos</b> esperando a CEO.`;
+    const todayTasks = S.tasks.filter((t) => t.status !== 'Concluída' && t.due && diff(t.due) === 0).length;
+    const empty = !S.contents.length && !S.tasks.length;
+    const summary = empty
+      ? 'O Hub está pronto e vazio. Comece cadastrando os conteúdos da semana em <b>Produção</b>.'
+      : isCEO()
+        ? `Você tem <b>${n.approvals} ${n.approvals === 1 ? 'aprovação' : 'aprovações'}</b> e <b>${n.ceoTasks} ${n.ceoTasks === 1 ? 'tarefa' : 'tarefas'}</b> esperando sua decisão.`
+        : `A equipe tem <b>${todayTasks} ${todayTasks === 1 ? 'tarefa' : 'tarefas'} para hoje</b>, <b>${n.lateTasks} ${n.lateTasks === 1 ? 'atrasada' : 'atrasadas'}</b> e <b>${n.approvals} ${n.approvals === 1 ? 'conteúdo' : 'conteúdos'}</b> esperando a CEO.`;
 
     const upcoming = []
-      .concat(state.contents.filter((c) => c.stage !== 'publicado').map((c) => ({ date: c.stage === 'agendado' ? c.publish : c.due, title: c.title, kind: c.stage === 'agendado' ? 'Publicação' : NEXT_STEP[c.stage], who: nextOwner(c), act: 'content', id: c.id })))
-      .concat(state.tasks.filter((t) => t.status !== 'Concluída').map((t) => ({ date: t.due, title: t.title, kind: 'Tarefa', who: t.owner, act: 'task', id: t.id })))
-      .filter((u) => diff(u.date) >= 0 && diff(u.date) <= 7)
+      .concat(S.contents.filter((c) => c.stage !== 'publicado').map((c) => ({ date: c.stage === 'agendado' ? c.publish : c.due, title: c.title, kind: c.stage === 'agendado' ? 'Publicação' : NEXT_STEP[c.stage], who: nextOwner(c), act: 'content', id: c.id })))
+      .concat(S.tasks.filter((t) => t.status !== 'Concluída').map((t) => ({ date: t.due, title: t.title, kind: 'Tarefa', who: t.owner, act: 'task', id: t.id })))
+      .filter((u) => u.date && diff(u.date) >= 0 && diff(u.date) <= 7)
       .sort((a, b) => a.date.localeCompare(b.date))
       .slice(0, 8);
 
-    const total = state.contents.length;
-    const stageCounts = SEED.STAGES.map((s) => ({ ...s, n: state.contents.filter((c) => c.stage === s.id).length }));
-
-    const team = SEED.PEOPLE.map((p) => {
-      const cs = state.contents.filter((c) => nextOwner(c) === p.id && !DONE_STAGES.includes(c.stage)).length;
-      const ts = state.tasks.filter((t) => t.owner === p.id && t.status !== 'Concluída');
+    const total = S.contents.length;
+    const stageCounts = K.STAGES.map((s) => ({ ...s, n: S.contents.filter((c) => c.stage === s.id).length }));
+    const load = team().map((p) => {
+      const cs = S.contents.filter((c) => nextOwner(c) === p.id && c.stage !== 'publicado').length;
+      const ts = S.tasks.filter((t) => t.owner === p.id && t.status !== 'Concluída');
       const late = ts.filter(taskLate).length;
       return { p, cs, ts: ts.length - late, late, total: cs + ts.length };
     });
-    const maxLoad = Math.max(...team.map((t) => t.total), 1);
-
+    const maxLoad = Math.max(...load.map((t) => t.total), 1);
     const kpi = (icon, k, v, h, go, extra = '', cls = '') => `<div class="card kpi ${cls}" data-act="go" data-id="${go}" role="link" tabindex="0"><div class="k">${I[icon]}${k}</div><div class="v">${v}</div><div class="h">${h}</div>${extra}</div>`;
 
     return `
@@ -313,37 +320,38 @@
       <div class="slash"><span></span><span></span><span></span></div>
       <div>
         <div class="date">${WD[TODAY.getDay()]} · ${TODAY.getDate()} de ${MONTHS[TODAY.getMonth()]}</div>
-        <h1>${hello}, ${esc(meP.id === 'ceo' ? 'Diretoria' : meP.name.split(' ')[0])}.</h1>
+        <h1>${hello}, ${esc(meP.name.split(' ')[0])}.</h1>
         <p>${summary}</p>
       </div>
       ${first ? `<div class="next"><div class="k">Próximo passo</div><div class="v">${esc(first.title)}</div><div style="font-size:12px;color:#B9C1DA;margin:-6px 0 10px">${esc(first.step)}</div>
-        <div style="display:flex;align-items:center;gap:10px;justify-content:space-between">${who(first.who)}<button class="btn primary sm" data-act="${first.act}" data-id="${first.id}">Abrir ${I.arrow}</button></div></div>` : ''}
+        <div style="display:flex;align-items:center;gap:10px;justify-content:space-between">${who(first.who)}<button class="btn primary sm" data-act="${first.act}" data-id="${first.id}">Abrir ${I.arrow}</button></div></div>`
+        : (canEditContent() ? `<div class="next"><div class="k">Para começar</div><div class="v">Cadastre o primeiro conteúdo</div><button class="btn primary sm" data-act="new-content">${I.plus}Novo conteúdo</button></div>` : '')}
     </section>
 
     <section class="kpis">
       ${kpi('cal', 'Produção da semana', `${weekReady}<small>/${week.length}</small>`, 'prontos (aprovados, agendados ou publicados)', 'calendario', `<div class="bar"><i style="width:${week.length ? (weekReady / week.length) * 100 : 0}%"></i></div>`)}
-      ${kpi('board', 'Conteúdos pendentes', pending, 'em produção, ainda sem data garantida', 'producao')}
-      ${kpi('alert', 'Tarefas atrasadas', n.lateTasks, n.lateTasks ? 'precisam de atenção hoje' : 'nada atrasado', 'tarefas?late', '', n.lateTasks ? 'alert' : '')}
+      ${kpi('board', 'Conteúdos pendentes', pending, 'em produção, ainda não agendados', 'producao')}
+      ${kpi('alert', 'Tarefas atrasadas', n.lateTasks, n.lateTasks ? 'precisam de atenção' : 'nada atrasado', 'tarefas?late', '', n.lateTasks ? 'alert' : '')}
       ${kpi('check', 'Aprovações necessárias', n.approvals, 'esperando a CEO', 'aprovacoes')}
     </section>
 
     <section class="grid-2">
       <div class="card">
-        <div class="card-h"><h2>Precisa de atenção</h2><span class="sub">${att.length} itens · ${isCEO() ? 'o que depende de você aparece primeiro' : 'ordenado por prazo'}</span></div>
+        <div class="card-h"><h2>Precisa de atenção</h2><span class="sub">${att.length} ${att.length === 1 ? 'item' : 'itens'}</span></div>
         <div class="list">
           ${att.slice(0, 7).map((a) => `
-            <div class="row" data-act="${a.act}" data-id="${a.id}">
+            <div class="row" data-act="${a.act}" data-id="${a.id}" tabindex="0">
               ${avatar(a.who, 'lg')}
-              <div class="grow"><div class="t">${esc(a.title)}</div><div class="s">${a.tag}<span>${esc(a.step)}</span>${a.who === 'ceo' || a.ceo ? '<span class="badge ceo">Depende da CEO</span>' : ''}</div></div>
+              <div class="grow"><div class="t">${esc(a.title)}</div><div class="s">${a.tag}<span>${esc(a.step)}</span>${a.ceo ? '<span class="badge ceo">Depende da CEO</span>' : ''}</div></div>
               <div class="when">${dueTag(a.date)}</div>
-            </div>`).join('') || '<div class="empty" style="margin:0 18px 18px">Nada pendente. 🎉</div>'}
+            </div>`).join('') || '<div class="empty" style="margin:0 18px 18px">Nada pendente.</div>'}
         </div>
       </div>
       <div class="card">
         <div class="card-h"><h2>Próximos prazos</h2><span class="sub">próximos 7 dias</span><a class="right" href="#/calendario" style="font-size:12.5px;font-weight:600">Calendário →</a></div>
         <div class="list">
           ${upcoming.map((u) => `
-            <div class="row" data-act="${u.act}" data-id="${u.id}">
+            <div class="row" data-act="${u.act}" data-id="${u.id}" tabindex="0">
               <div style="width:52px;text-align:center"><div class="mono" style="font-size:18px;font-weight:600;line-height:1">${pad(parse(u.date).getDate())}</div><div class="mono muted" style="font-size:10.5px;text-transform:uppercase">${WD[parse(u.date).getDay()]}</div></div>
               <div class="grow"><div class="t">${esc(u.title)}</div><div class="s"><span>${esc(u.kind)}</span>·<span>${esc(person(u.who).name)}</span></div></div>
               <div class="when muted">${rel(u.date)}</div>
@@ -354,7 +362,7 @@
 
     <section class="grid-2">
       <div class="card">
-        <div class="card-h"><h2>Funil de produção</h2><span class="sub">${total} conteúdos por etapa</span><a class="right" href="#/producao" style="font-size:12.5px;font-weight:600">Abrir Kanban →</a></div>
+        <div class="card-h"><h2>Funil de produção</h2><span class="sub">${total} ${total === 1 ? 'conteúdo' : 'conteúdos'} por etapa</span><a class="right" href="#/producao" style="font-size:12.5px;font-weight:600">Abrir Kanban →</a></div>
         <div class="card-b">
           <div class="pipeline">${stageCounts.filter((s) => s.n).map((s) => `<i class="st st-${s.id}" style="width:${(s.n / total) * 100}%" title="${esc(s.label)}: ${s.n}"></i>`).join('')}</div>
           <div class="legend">${stageCounts.map((s) => `<div class="st st-${s.id}" data-act="go" data-id="producao"><span class="sw"></span>${esc(s.label)}<b>${s.n}</b></div>`).join('')}</div>
@@ -363,12 +371,12 @@
       <div class="card">
         <div class="card-h"><h2>Carga da equipe</h2><span class="sub">conteúdos e tarefas abertas</span></div>
         <div class="card-b load">
-          ${team.map((t) => `<div class="l">${who(t.p.id, t.p.role)}
+          ${load.map((t) => `<div class="l">${who(t.p.id, roleLabel(t.p.papel))}
             <div class="track" title="${t.cs} conteúdos · ${t.ts} tarefas no prazo · ${t.late} atrasadas">
               <i style="width:${(t.cs / maxLoad) * 100}%;background:var(--blue)"></i>
               <i style="width:${(t.ts / maxLoad) * 100}%;background:#9DB4FF"></i>
               <i style="width:${(t.late / maxLoad) * 100}%;background:var(--danger)"></i>
-            </div><span class="num">${t.total}</span></div>`).join('')}
+            </div><span class="num">${t.total}</span></div>`).join('') || '<div class="empty">Ninguém da equipe cadastrado ainda.</div>'}
           <div class="cal-legend" style="margin-top:2px">
             <span><i style="--c:var(--blue)"></i>Conteúdos</span><span><i style="--c:#9DB4FF"></i>Tarefas no prazo</span><span><i style="--c:var(--danger)"></i>Atrasadas</span>
           </div>
@@ -380,8 +388,8 @@
   /* ---------------- 2. Produção (Kanban) ---------------- */
   function kanbanFiltered() {
     const f = ui.kanban; const q = f.q.trim().toLowerCase();
-    return state.contents.filter((c) =>
-      (!q || (c.title + ' ' + c.id + ' ' + c.pillar).toLowerCase().includes(q)) &&
+    return S.contents.filter((c) =>
+      (!q || (c.title + ' ' + code(c) + ' ' + (c.pillar || '')).toLowerCase().includes(q)) &&
       (!f.owner || nextOwner(c) === f.owner || c.owner === f.owner) &&
       (!f.format || c.format === f.format) &&
       (!f.channel || c.channel === f.channel) &&
@@ -389,12 +397,13 @@
   }
 
   function kcard(c) {
-    const n = diff(c.due);
     const done = ['publicado', 'agendado'].includes(c.stage);
-    const dueCls = done ? '' : n < 0 ? 'late' : n === 0 ? 'today' : '';
-    const dueTxt = c.stage === 'agendado' || c.stage === 'publicado' ? `pub. ${fmt(c.publish)}` : n < 0 ? `atrasado ${-n}d` : n === 0 ? 'prazo hoje' : `prazo ${fmt(c.due)}`;
-    return `<article class="kcard" draggable="true" data-card="${c.id}" data-act="content" data-id="${c.id}">
-      <div class="id">${c.id}<span>·</span>${esc(c.channel)}${c.comments.length ? `<span style="margin-left:auto">💬 ${c.comments.length}</span>` : ''}</div>
+    const n = c.due ? diff(c.due) : null;
+    const dueCls = done || n === null ? '' : n < 0 ? 'late' : n === 0 ? 'today' : '';
+    const dueTxt = done ? `pub. ${fmt(c.publish)}` : n === null ? 'sem prazo' : n < 0 ? `atrasado ${-n}d` : n === 0 ? 'prazo hoje' : `prazo ${fmt(c.due)}`;
+    const nc = (c.comments || []).length;
+    return `<article class="kcard" draggable="${canEditContent() || isCEO()}" data-card="${c.id}" data-act="content" data-id="${c.id}" tabindex="0">
+      <div class="id">${code(c)}<span>·</span>${esc(c.channel)}${nc ? `<span style="margin-left:auto">💬 ${nc}</span>` : ''}</div>
       <div class="ttl">${esc(c.title)}</div>
       <div class="meta"><span class="badge fmt">${esc(c.format)}</span>${c.video ? `<span class="vid">${I.play.replace('<svg', '<svg width="10" height="10"')} vídeo</span>` : ''}${c.stage === 'aguardando_aprovacao' ? '<span class="badge ceo">CEO</span>' : ''}</div>
       <div class="foot"><span class="due ${dueCls}">${I.clock.replace('<svg', '<svg width="12" height="12"')}${dueTxt}</span>${avatar(nextOwner(c))}</div>
@@ -404,19 +413,19 @@
   function pageKanban() {
     const f = ui.kanban;
     const list = kanbanFiltered();
-    return head('Produção de conteúdo', 'Kanban de produção', 'Arraste os cards entre as etapas ou clique para ver detalhes. O avatar mostra quem tem o próximo passo.',
-      `<button class="btn primary" data-act="new-content">${I.plus}Novo conteúdo</button>`) + `
+    return head('Produção de conteúdo', 'Kanban de produção', 'Arraste os cards entre as etapas ou clique para editar. O avatar mostra quem tem o próximo passo.', newContentBtn()) + `
     <div class="filters">
       <input class="input search" id="k-q" placeholder="Buscar título, código ou tema" value="${esc(f.q)}" data-filter="kanban.q">
       <select class="input" data-filter="kanban.owner">${peopleOpts(f.owner, 'Todos os responsáveis')}</select>
-      <select class="input" data-filter="kanban.format">${options(SEED.FORMATS, f.format, 'Todos os formatos')}</select>
-      <select class="input" data-filter="kanban.channel">${options(SEED.CHANNELS, f.channel, 'Todos os canais')}</select>
+      <select class="input" data-filter="kanban.format">${options(K.FORMATS, f.format, 'Todos os formatos')}</select>
+      <select class="input" data-filter="kanban.channel">${options(K.CHANNELS, f.channel, 'Todos os canais')}</select>
       <label class="chip-toggle ${f.late ? 'on' : ''}"><input type="checkbox" data-filter="kanban.late" ${f.late ? 'checked' : ''}>Só atrasados</label>
       ${f.q || f.owner || f.format || f.channel || f.late ? '<button class="btn ghost sm" data-act="clear-kanban">Limpar filtros</button>' : ''}
-      <span class="result">${list.length} de ${state.contents.length}</span>
+      <span class="result">${list.length} de ${S.contents.length}</span>
     </div>
+    ${!S.contents.length ? `<div class="empty" style="margin-bottom:14px">Nenhum conteúdo ainda. ${canEditContent() ? 'Clique em <b>Novo conteúdo</b> para cadastrar o primeiro post.' : ''}</div>` : ''}
     <div class="kanban" id="kanban">
-      ${SEED.STAGES.map((s) => { const cards = list.filter((c) => c.stage === s.id); return `
+      ${K.STAGES.map((s) => { const cards = list.filter((c) => c.stage === s.id); return `
         <section class="col st st-${s.id}">
           <div class="col-h"><span class="dot"></span><b>${esc(s.label)}</b><span class="n">${cards.length}</span></div>
           <div class="col-b" data-drop="${s.id}">${cards.map(kcard).join('')}</div>
@@ -426,28 +435,31 @@
 
   /* ---------------- 3. Central de aprovação ---------------- */
   function approvalLists() {
-    const recent = state.contents.filter((c) => c.comments.some((m) => m.decision === 'aprovado') && ['aprovado', 'agendado', 'publicado'].includes(c.stage));
+    const approved = (c) => (c.comments || []).some((m) => m.decision === 'aprovado');
     return {
-      aguardando: state.contents.filter((c) => c.stage === 'aguardando_aprovacao').sort((a, b) => a.due.localeCompare(b.due)),
-      ajustes: state.contents.filter((c) => c.stage === 'ajustes'),
-      aprovados: recent
+      aguardando: S.contents.filter((c) => c.stage === 'aguardando_aprovacao').sort((a, b) => String(a.due || '9').localeCompare(String(b.due || '9'))),
+      ajustes: S.contents.filter((c) => c.stage === 'ajustes'),
+      aprovados: S.contents.filter((c) => approved(c) && READY_STAGES.includes(c.stage))
     };
   }
 
   function playerHTML(c) {
-    const src = c.video || ui.localVideo[c.id];
-    if (src) {
-      return `<div class="player"><video id="review-video" src="${esc(src)}" controls preload="metadata" playsinline></video></div>
-        ${!c.video ? '<div class="local-note">Pré-visualização de um arquivo do seu computador. Nada foi enviado: ao recarregar a página, o vídeo some.</div>' : ''}`;
+    const m = media(c.video);
+    if (!m) {
+      return `<div class="player"><div class="none">${I.film}<b>Sem vídeo nesta versão</b>
+        <p>Cole o link do vídeo (Google Drive ou YouTube "não listado") no card do conteúdo, campo <b>Link do vídeo</b>.</p>
+        ${canEditContent() ? `<button class="btn sm" style="background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.2)" data-act="content" data-id="${c.id}">Abrir o card</button>` : ''}</div></div>`;
     }
-    return `<div class="player"><div class="none">${I.film}<b>Sem arquivo de vídeo nesta versão</b>
-      <p>Neste protótipo não há upload real. Você pode pré-visualizar um vídeo do seu computador. Ele não é enviado a lugar nenhum.</p>
-      <label class="btn sm" style="background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.2)">Escolher vídeo do computador<input type="file" accept="video/*" hidden data-local-video="${c.id}"></label></div></div>`;
+    if (m.type === 'iframe') return `<div class="player"><iframe src="${esc(m.src)}" allow="autoplay; encrypted-media; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin" title="Vídeo"></iframe></div>
+      <div class="local-note neutral">Se o vídeo não abrir, confira se o arquivo no Drive está compartilhado com "Qualquer pessoa com o link". <a href="${esc(c.video)}" target="_blank" rel="noopener">Abrir em nova aba</a></div>`;
+    if (m.type === 'video') return `<div class="player"><video id="review-video" src="${esc(m.src)}" controls preload="metadata" playsinline></video></div>`;
+    return `<div class="player"><div class="none">${I.link}<b>Link do vídeo</b><p>Este endereço não toca dentro do Hub.</p><a class="btn sm" href="${esc(m.src)}" target="_blank" rel="noopener">Abrir em nova aba</a></div></div>`;
   }
 
-  function thread(c) {
-    return `<div class="thread" id="thread">${c.comments.map((m) => `
-      <div class="msg ${m.decision || ''}">${avatar(m.by)}<div class="bubble"><div class="h"><b>${esc(person(m.by).name)}</b><span>${rel(m.date)}</span>${m.decision === 'aprovado' ? '<span class="badge st st-aprovado">Aprovou</span>' : m.decision === 'ajustes' ? '<span class="badge st st-ajustes">Pediu ajustes</span>' : ''}</div>${esc(m.text)}</div></div>`).join('') || '<div class="muted" style="font-size:12.5px">Nenhum comentário ainda.</div>'}</div>`;
+  function thread(c, id = 'thread') {
+    const list = (c.comments || []).slice().sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    return `<div class="thread" id="${id}">${list.map((m) => `
+      <div class="msg ${m.decision || ''}">${avatar(m.by)}<div class="bubble"><div class="h"><b>${esc(person(m.by).name)}</b><span>${rel(m.at)}</span>${m.decision === 'aprovado' ? '<span class="badge st st-aprovado">Aprovou</span>' : m.decision === 'ajustes' ? '<span class="badge st st-ajustes">Pediu ajustes</span>' : ''}</div>${esc(m.text)}</div></div>`).join('') || '<div class="muted" style="font-size:12.5px">Nenhum comentário ainda.</div>'}</div>`;
   }
 
   function pageApproval() {
@@ -459,13 +471,13 @@
     const tabs = [['aguardando', 'Aguardando'], ['ajustes', 'Em ajustes'], ['aprovados', 'Aprovados']];
     const canDecide = c && c.stage === 'aguardando_aprovacao';
 
-    return head('Central de aprovação', 'Aprovar conteúdos', 'Veja o roteiro e o vídeo, comente e decida. Cada decisão fica registrada no histórico do conteúdo.') + `
+    return head('Central de aprovação', 'Aprovar conteúdos', 'Veja o roteiro e o vídeo, comente e decida. Cada decisão fica registrada no histórico, com nome e data.') + `
     <div class="approval">
       <aside class="card queue">
         <div class="tabs">${tabs.map(([k, l]) => `<button class="${tab === k ? 'on' : ''}" data-act="ap-tab" data-id="${k}">${l}<span class="n">${lists[k].length}</span></button>`).join('')}</div>
         <div style="margin-top:10px">
-          ${list.map((x) => `<div class="qitem ${x.id === ui.approval.selected ? 'on' : ''}" data-act="ap-select" data-id="${x.id}">
-            <div class="mono muted" style="font-size:11px">${x.id} · v${x.version}</div>
+          ${list.map((x) => `<div class="qitem ${x.id === ui.approval.selected ? 'on' : ''}" data-act="ap-select" data-id="${x.id}" tabindex="0">
+            <div class="mono muted" style="font-size:11px">${code(x)} · v${x.version || 1}</div>
             <div class="t">${esc(x.title)}</div>
             <div class="m"><span class="badge fmt">${esc(x.format)}</span>${x.video ? '<span class="badge">▶ vídeo</span>' : '<span class="badge">sem vídeo</span>'}${dueTag(x.due, tab === 'aprovados')}</div>
           </div>`).join('') || '<div class="empty" style="margin:0 12px 12px">Nenhum conteúdo nesta lista.</div>'}
@@ -473,16 +485,17 @@
       </aside>
       ${c ? `<section class="card">
         <div class="review-h">
-          <div class="id">${c.id} · versão ${c.version} · ${esc(c.channel)}</div>
+          <div class="id">${code(c)} · versão ${c.version || 1} · ${esc(c.channel)}</div>
           <h2>${esc(c.title)}</h2>
-          <div class="m">${stageBadge(c.stage)}<span class="badge fmt">${esc(c.format)}</span><span class="badge">Pilar: ${esc(c.pillar)}</span>${who(c.owner, 'responsável')}<span class="muted" style="font-size:12.5px">Publicação prevista: <b class="mono">${fmt(c.publish)}</b></span></div>
+          <div class="m">${stageBadge(c.stage)}<span class="badge fmt">${esc(c.format)}</span>${c.pillar ? `<span class="badge">Pilar: ${esc(c.pillar)}</span>` : ''}${who(c.owner, 'responsável')}<span class="muted" style="font-size:12.5px">Publicação prevista: <b class="mono">${fmt(c.publish)}</b></span></div>
         </div>
         <div class="review-body">
           <div class="review-main">
             <p class="section-t">Vídeo</p>
             ${playerHTML(c)}
-            <p class="section-t" style="margin-top:20px">Roteiro · versão ${c.version}</p>
+            <p class="section-t" style="margin-top:20px">Roteiro · versão ${c.version || 1}</p>
             <div class="script">${esc(c.script) || '<span class="muted">Roteiro ainda não escrito.</span>'}</div>
+            ${c.caption ? `<p class="section-t" style="margin-top:20px">Legenda</p><div class="script">${esc(c.caption)}</div>` : ''}
           </div>
           <div class="review-side">
             <div class="decision">
@@ -492,29 +505,28 @@
                   <button class="btn approve" data-act="approve" data-id="${c.id}" ${isCEO() ? '' : 'disabled'}>${I.check}Aprovar</button>
                   <button class="btn adjust" data-act="adjust" data-id="${c.id}" ${isCEO() ? '' : 'disabled'}>Pedir ajustes</button>
                 </div>
-                ${isCEO() ? '' : `<div class="lock">${I.lock.replace('<svg', '<svg width="13" height="13" style="vertical-align:-2px"')} Só a CEO aprova. Para testar, mude <b>Visualizar como</b> para <b>CEO</b> no topo.</div>`}`
-              : c.stage === 'ajustes' ? `<p>A CEO pediu ajustes. Quando a nova versão estiver pronta, reenvie.</p><button class="btn primary" style="width:100%" data-act="resubmit" data-id="${c.id}">Reenviar para aprovação (v${c.version + 1})</button>`
-              : `<p>Este conteúdo já foi aprovado.</p>${c.stage === 'aprovado' ? `<button class="btn dark" style="width:100%" data-act="schedule" data-id="${c.id}">Marcar como agendado</button>` : stageBadge(c.stage)}`}
+                ${isCEO() ? '' : `<div class="lock">${I.lock.replace('<svg', '<svg width="13" height="13" style="vertical-align:-2px"')} Só a CEO aprova ou pede ajustes.</div>`}`
+              : c.stage === 'ajustes' ? `<p>A CEO pediu ajustes. Quando a nova versão estiver pronta, reenvie.</p>${canEditContent() ? `<button class="btn primary" style="width:100%" data-act="resubmit" data-id="${c.id}">Reenviar para aprovação (v${(c.version || 1) + 1})</button>` : ''}`
+              : `<p>Este conteúdo já foi aprovado.</p>${c.stage === 'aprovado' && canEditContent() ? `<button class="btn dark" style="width:100%" data-act="schedule" data-id="${c.id}">Marcar como agendado</button>` : stageBadge(c.stage)}`}
             </div>
             <div>
-              <p class="section-t">Comentários (${c.comments.length})</p>
+              <p class="section-t">Comentários (${(c.comments || []).length})</p>
               ${thread(c)}
               <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
                 <textarea class="input" id="ap-comment" placeholder="${canDecide && isCEO() ? 'Ex.: aos 0:12, trocar a legenda…' : 'Escreva um comentário…'}"></textarea>
-                ${c.video || ui.localVideo[c.id] ? '<label class="chip-toggle" style="font-weight:500;font-size:12px"><input type="checkbox" id="ap-time">Marcar o minuto atual do vídeo</label>' : ''}
-                <button class="btn" data-act="comment" data-id="${c.id}">Comentar como ${esc(person(me()).name)}</button>
+                <button class="btn" data-act="comment" data-id="${c.id}">Comentar</button>
               </div>
             </div>
           </div>
         </div>
-      </section>` : `<section class="empty" style="padding:60px">Selecione um conteúdo na lista ao lado.</section>`}
+      </section>` : `<section class="empty" style="padding:60px">Nada para revisar nesta lista. Quando a equipe mover um conteúdo para <b>Aguardando aprovação</b>, ele aparece aqui.</section>`}
     </div>`;
   }
 
   /* ---------------- 4. Calendário editorial ---------------- */
   function calFiltered() {
     const f = ui.cal;
-    return state.contents.filter((c) => (!f.owner || c.owner === f.owner) && (!f.format || c.format === f.format) && (!f.stage || c.stage === f.stage));
+    return S.contents.filter((c) => c.publish && (!f.owner || c.owner === f.owner) && (!f.format || c.format === f.format) && (!f.stage || c.stage === f.stage));
   }
   const evHTML = (c) => `<div class="ev st st-${c.stage}" data-act="content" data-id="${c.id}" title="${esc(c.title)} · ${esc(c.format)} · ${esc(stageLabel(c.stage))} · ${esc(person(c.owner).name)}">${avatar(c.owner, 'av')}<span>${esc(c.format)} · ${esc(c.title)}</span></div>`;
 
@@ -537,11 +549,10 @@
 
     const monthList = list.filter((c) => { const d = parse(c.publish); return d.getMonth() === f.month && d.getFullYear() === f.year; }).sort((a, b) => a.publish.localeCompare(b.publish));
     const listView = `<div class="card table-wrap"><table class="table"><thead><tr><th>Data</th><th>Conteúdo</th><th>Formato</th><th>Status</th><th>Responsável</th></tr></thead><tbody>
-      ${monthList.map((c) => `<tr data-act="content" data-id="${c.id}" style="cursor:pointer"><td class="mono" style="white-space:nowrap">${fmt(c.publish)}</td><td><div class="tt">${esc(c.title)}</div><div class="tsub">${c.id} · ${esc(c.channel)}</div></td><td><span class="badge fmt">${esc(c.format)}</span></td><td>${stageBadge(c.stage)}</td><td>${who(c.owner)}</td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Nada publicado neste mês com os filtros atuais.</div></td></tr>'}
+      ${monthList.map((c) => `<tr data-act="content" data-id="${c.id}" style="cursor:pointer"><td class="mono" style="white-space:nowrap">${fmt(c.publish)}</td><td><div class="tt">${esc(c.title)}</div><div class="tsub">${code(c)} · ${esc(c.channel)}</div></td><td><span class="badge fmt">${esc(c.format)}</span></td><td>${stageBadge(c.stage)}</td><td>${who(c.owner)}</td></tr>`).join('') || '<tr><td colspan="5"><div class="empty">Nada previsto para este mês com os filtros atuais.</div></td></tr>'}
     </tbody></table></div>`;
 
-    return head('Calendário editorial', 'Calendário de publicações', 'Cada conteúdo aparece na data prevista de publicação, com formato, status (cor) e responsável (avatar).',
-      `<button class="btn primary" data-act="new-content">${I.plus}Novo conteúdo</button>`) + `
+    return head('Calendário editorial', 'Calendário de publicações', 'Cada conteúdo aparece na data prevista de publicação, com formato, status (cor) e responsável (avatar).', newContentBtn()) + `
     <div class="cal-head">
       <button class="btn sm" data-act="cal-prev" aria-label="Mês anterior">${I.chevL}</button>
       <button class="btn sm" data-act="cal-next" aria-label="Próximo mês">${I.chevR}</button>
@@ -552,21 +563,18 @@
     </div>
     <div class="filters">
       <select class="input" data-filter="cal.owner">${peopleOpts(f.owner, 'Todos os responsáveis')}</select>
-      <select class="input" data-filter="cal.format">${options(SEED.FORMATS, f.format, 'Todos os formatos')}</select>
-      <select class="input" data-filter="cal.stage">${options(SEED.STAGES.map((s) => ({ value: s.id, label: s.label })), f.stage, 'Todos os status')}</select>
+      <select class="input" data-filter="cal.format">${options(K.FORMATS, f.format, 'Todos os formatos')}</select>
+      <select class="input" data-filter="cal.stage">${options(K.STAGES.map((s) => ({ value: s.id, label: s.label })), f.stage, 'Todos os status')}</select>
       <span class="result">${monthList.length} no mês</span>
     </div>
     ${f.view === 'mes' ? grid : listView}
-    <div class="cal-legend">${SEED.STAGES.map((s) => `<span class="st st-${s.id}"><i></i>${esc(s.label)}</span>`).join('')}</div>`;
+    <div class="cal-legend">${K.STAGES.map((s) => `<span class="st st-${s.id}"><i></i>${esc(s.label)}</span>`).join('')}</div>`;
   }
 
   /* ---------------- 5. Tarefas ---------------- */
-  const STATUSES = ['A fazer', 'Em andamento', 'Bloqueada', 'Concluída'];
-  const PRIORITIES = ['Alta', 'Média', 'Baixa'];
-
   function tasksFiltered() {
     const f = ui.tasks; const q = f.q.trim().toLowerCase();
-    return state.tasks.filter((t) =>
+    return S.tasks.filter((t) =>
       (!q || t.title.toLowerCase().includes(q)) &&
       (!f.owner || t.owner === f.owner) &&
       (!f.status || t.status === f.status) &&
@@ -574,7 +582,7 @@
       (!f.ceo || t.ceo) &&
       (!f.late || taskLate(t)) &&
       (!f.hideDone || t.status !== 'Concluída' || f.status === 'Concluída'))
-      .sort((a, b) => (a.status === 'Concluída') - (b.status === 'Concluída') || a.due.localeCompare(b.due) || PRIORITIES.indexOf(a.priority) - PRIORITIES.indexOf(b.priority));
+      .sort((a, b) => (a.status === 'Concluída') - (b.status === 'Concluída') || String(a.due || '9').localeCompare(String(b.due || '9')) || PRIORITIES.indexOf(a.priority) - PRIORITIES.indexOf(b.priority));
   }
 
   function pageTasks() {
@@ -589,82 +597,126 @@
       <select class="input" data-filter="tasks.status">${options(STATUSES, f.status, 'Todos os status')}</select>
       <select class="input" data-filter="tasks.priority">${options(PRIORITIES, f.priority, 'Todas as prioridades')}</select>
       ${chip('ceo', 'Depende da CEO')}${chip('late', 'Atrasadas')}${chip('hideDone', 'Ocultar concluídas')}
-      <span class="result">${list.length} tarefas</span>
+      <span class="result">${list.length} ${list.length === 1 ? 'tarefa' : 'tarefas'}</span>
     </div>
     <div class="card table-wrap">
       <table class="table">
-        <thead><tr><th style="width:40px"></th><th>Tarefa</th><th>Responsável</th><th>Prazo</th><th>Prioridade</th><th>Status</th><th>CEO</th></tr></thead>
+        <thead><tr><th style="width:40px"></th><th>Tarefa</th><th>Responsável</th><th>Prazo</th><th>Prioridade</th><th>Status</th><th>CEO</th><th></th></tr></thead>
         <tbody>
         ${list.map((t) => { const c = t.content ? content(t.content) : null; const done = t.status === 'Concluída'; return `
           <tr class="${done ? 'done' : ''}">
             <td><input type="checkbox" class="check" data-act="task-done" data-id="${t.id}" ${done ? 'checked' : ''} aria-label="Concluir tarefa"></td>
-            <td><div class="tt">${esc(t.title)}</div><div class="tsub">${t.id}${c ? ` · <a data-act="content" data-id="${c.id}">${c.id} ${esc(c.title.slice(0, 42))}${c.title.length > 42 ? '…' : ''}</a>` : ''}${t.note ? ` · <span style="color:var(--danger)">${esc(t.note)}</span>` : ''}</div></td>
+            <td><div class="tt">${esc(t.title)}</div><div class="tsub">${c ? `<a data-act="content" data-id="${c.id}">${code(c)} ${esc(c.title.slice(0, 42))}${c.title.length > 42 ? '…' : ''}</a>` : ''}${t.note ? `${c ? ' · ' : ''}<span style="color:var(--danger)">${esc(t.note)}</span>` : ''}</div></td>
             <td>${who(t.owner)}</td>
-            <td style="white-space:nowrap">${dueTag(t.due, done)}${!done && diff(t.due) > 0 ? `<div class="muted" style="font-size:11px">${rel(t.due)}</div>` : ''}</td>
+            <td style="white-space:nowrap">${dueTag(t.due, done)}${!done && t.due && diff(t.due) > 0 ? `<div class="muted" style="font-size:11px">${rel(t.due)}</div>` : ''}</td>
             <td><span class="badge ${prioClass(t.priority)}">${t.priority}</span></td>
             <td><select class="mini" data-task-status="${t.id}">${options(STATUSES, t.status)}</select></td>
             <td><button class="btn ghost sm" data-act="task-ceo" data-id="${t.id}" title="Marcar/desmarcar: depende da CEO">${t.ceo ? '<span class="badge ceo">Depende</span>' : `<span class="muted">${I.flag.replace('<svg', '<svg width="14" height="14"')}</span>`}</button></td>
-          </tr>`; }).join('') || '<tr><td colspan="7"><div class="empty">Nenhuma tarefa com esses filtros.</div></td></tr>'}
+            <td><button class="btn ghost sm" data-act="edit-task" data-id="${t.id}">Editar</button></td>
+          </tr>`; }).join('') || `<tr><td colspan="8"><div class="empty">${S.tasks.length ? 'Nenhuma tarefa com esses filtros.' : 'Nenhuma tarefa ainda. Clique em <b>Nova tarefa</b>.'}</div></td></tr>`}
         </tbody>
       </table>
     </div>`;
   }
 
   /* ---------------- 6. Área de clientes ---------------- */
-  function libraryHTML(inShell) {
+  function libraryGrid(items, manage) {
     const p = ui.portal;
-    const cats = [...new Set(SEED.LIBRARY.map((l) => l.cat))];
-    const vids = SEED.LIBRARY.filter((l) => l.type === 'video' && (!p.cat || l.cat === p.cat));
-    const mats = SEED.LIBRARY.filter((l) => l.type === 'material' && (!p.cat || l.cat === p.cat));
-    const catBar = `<div class="filters"><button class="chip-toggle ${!p.cat ? 'on' : ''}" data-act="portal-cat" data-id="">Todos</button>${cats.map((c) => `<button class="chip-toggle ${p.cat === c ? 'on' : ''}" data-act="portal-cat" data-id="${esc(c)}">${esc(c)}</button>`).join('')}</div>`;
+    const vids = items.filter((l) => l.tipo === 'video' && (!p.cat || l.categoria === p.cat));
+    const mats = items.filter((l) => l.tipo === 'material' && (!p.cat || l.categoria === p.cat));
+    const cats = [...new Set(items.map((l) => l.categoria).filter(Boolean))];
+    const catBar = cats.length ? `<div class="filters"><button class="chip-toggle ${!p.cat ? 'on' : ''}" data-act="portal-cat" data-id="">Todos</button>${cats.map((c) => `<button class="chip-toggle ${p.cat === c ? 'on' : ''}" data-act="portal-cat" data-id="${esc(c)}">${esc(c)}</button>`).join('')}</div>` : '';
+    const edit = (l) => (manage ? `<button class="btn ghost sm" data-act="edit-lib" data-id="${l.id}">Editar</button>${l.publicado ? '' : '<span class="badge today">Rascunho</span>'}` : '');
     const videos = `<h2>Vídeos educativos</h2><div class="lib">${vids.map((v) => `
-      <article class="vcard" data-act="watch" data-id="${v.id}">
-        <div class="thumb"><div class="sl"><i></i><i></i><i></i></div><span class="play">${I.play}</span><div class="cap">${esc(v.title)}</div><span class="dur">${v.dur}</span></div>
-        <div class="info"><div class="t">${esc(v.title)}</div><div class="m"><span class="badge fmt">${esc(v.cat)}</span><span class="badge">${esc(v.level)}</span>${state.watched.includes(v.id) ? '<span class="badge st st-aprovado">Assistido</span>' : ''}</div></div>
-      </article>`).join('') || '<div class="empty">Nenhum vídeo nesta categoria.</div>'}</div>`;
+      <article class="vcard"><div class="thumb" data-act="watch" data-id="${v.id}"><div class="sl"><i></i><i></i><i></i></div><span class="play">${I.play}</span><div class="cap">${esc(v.titulo)}</div>${v.duracao ? `<span class="dur">${esc(v.duracao)}</span>` : ''}</div>
+        <div class="info"><div class="t">${esc(v.titulo)}</div><div class="m">${v.categoria ? `<span class="badge fmt">${esc(v.categoria)}</span>` : ''}${v.nivel ? `<span class="badge">${esc(v.nivel)}</span>` : ''}${edit(v)}</div></div>
+      </article>`).join('') || '<div class="empty">Nenhum vídeo ainda.</div>'}</div>`;
     const materials = `<h2>Materiais exclusivos</h2><div class="mats">${mats.map((m) => `
-      <div class="mat"><span class="ic">${m.file}</span><div><div class="t">${esc(m.title)}</div><div class="c">${esc(m.cat)}</div></div>
-      <button class="btn sm" data-act="download" title="Disponível quando o armazenamento de arquivos estiver conectado">${I.down}Baixar</button></div>`).join('') || '<div class="empty">Nenhum material nesta categoria.</div>'}</div>`;
-    const body = p.tab === 'videos' ? videos : p.tab === 'materiais' ? materials : videos + materials;
-    return catBar + body + `<div class="portal-note"><b>Demonstração.</b> No sistema real, cada cliente entra com login próprio e só vê o que foi liberado para a empresa dele. ${inShell ? 'A equipe Vindex escolhe aqui quais vídeos e materiais cada cliente recebe.' : 'Os downloads e vídeos vêm de armazenamento privado com links temporários.'}</div>`;
+      <div class="mat"><span class="ic">${esc((m.arquivo || 'LINK').slice(0, 4).toUpperCase())}</span><div style="min-width:0"><div class="t">${esc(m.titulo)}</div><div class="c">${esc(m.categoria || '')} ${edit(m)}</div></div>
+      ${safeUrl(m.link) ? `<a class="btn sm" href="${esc(safeUrl(m.link))}" target="_blank" rel="noopener">Abrir</a>` : ''}</div>`).join('') || '<div class="empty">Nenhum material ainda.</div>'}</div>`;
+    return catBar + (p.tab === 'videos' ? videos : p.tab === 'materiais' ? materials : videos + materials);
   }
 
-  function pageClientsPreview() {
-    return head('Área de clientes', 'Portal do cliente', 'Uma área separada da operação interna, com vídeos educativos e materiais exclusivos. Abaixo, a biblioteca como o cliente vê.',
-      `<button class="btn dark" data-act="profile" data-id="cliente">Abrir como cliente ${I.arrow}</button>`) +
+  function pageClients() {
+    return head('Área de clientes', 'Biblioteca dos clientes', 'Vídeos educativos e materiais que os clientes veem quando entram no Hub. Só aparecem para eles os itens marcados como publicados.',
+      canEditContent() ? `<button class="btn primary" data-act="new-lib">${I.plus}Novo item</button>` : '') +
       `<div class="seg" style="margin-bottom:14px">${[['videos', 'Vídeos'], ['materiais', 'Materiais'], ['tudo', 'Tudo']].map(([k, l]) => `<button class="${ui.portal.tab === k ? 'on' : ''}" data-act="portal-tab" data-id="${k}">${l}</button>`).join('')}</div>` +
-      libraryHTML(true);
+      libraryGrid(S.library, canEditContent()) +
+      `<div class="portal-note">Para dar acesso a um cliente, vá em <b>Acessos</b> e cadastre o e-mail dele com o perfil <b>Cliente</b>. Ele entra com o Google e vê só esta biblioteca, nunca a operação interna.</div>`;
   }
 
   function portal() {
-    const vids = SEED.LIBRARY.filter((l) => l.type === 'video');
-    const seen = vids.filter((v) => state.watched.includes(v.id)).length;
+    const items = S.library.filter((l) => l.publicado);
+    const meP = person(myEmail());
     return `<div class="portal">
       <header class="portal-top">
         <img src="assets/img/logo_on_light.png" alt="Vindex">
         <span class="sep"></span><span class="area">Área do cliente</span>
         <nav>${[['videos', 'Vídeos'], ['materiais', 'Materiais'], ['tudo', 'Tudo']].map(([k, l]) => `<button class="${ui.portal.tab === k ? 'on' : ''}" data-act="portal-tab" data-id="${k}">${l}</button>`).join('')}</nav>
         <span style="flex:1"></span>
-        <button class="demo-pill" data-act="about"><i></i>Protótipo · dados fictícios</button>
-        ${viewAs()}
+        ${userChip(meP)}
       </header>
       <section class="portal-hero"><div class="slash"><span></span><span></span><span></span></div><div>
-        <div class="k">${esc(CLIENT_NAME)} · cliente exemplo</div>
+        <div class="k">Olá, ${esc(meP.name.split(' ')[0])}</div>
         <h1>Entre vender e lucrar, existe a Vindex.</h1>
         <p>Vídeos curtos e materiais práticos para você entender os números do seu e-commerce e tomar decisões com segurança.</p>
-        <div class="prog"><div><b>${seen}/${vids.length}</b><span>vídeos assistidos</span></div><div><b>${SEED.LIBRARY.length - vids.length}</b><span>materiais disponíveis</span></div></div>
       </div></section>
-      <main class="portal-body">${libraryHTML(false)}</main>
+      <main class="portal-body">${libraryGrid(items, false)}</main>
     </div>`;
   }
 
+  /* ---------------- 7. Acessos ---------------- */
+  function pageAccess() {
+    const rows = S.users.slice().sort((a, b) => (a.papel === 'cliente') - (b.papel === 'cliente') || a.nome.localeCompare(b.nome));
+    return head('Administração', 'Acessos', 'Quem pode entrar no Hub e com qual perfil. A pessoa entra com o botão "Entrar com Google", usando exatamente o e-mail cadastrado aqui.',
+      `<button class="btn primary" data-act="new-user">${I.plus}Adicionar pessoa</button>`) + `
+    <div class="card table-wrap">
+      <table class="table">
+        <thead><tr><th>Pessoa</th><th>E-mail</th><th>Perfil</th><th>Acesso</th><th></th></tr></thead>
+        <tbody>
+        ${rows.map((u) => { const self = u.id === myEmail(); return `
+          <tr class="${u.ativo ? '' : 'done'}">
+            <td>${who(u.id)}</td>
+            <td class="mono" style="font-size:12.5px">${esc(u.id)}</td>
+            <td><select class="mini" data-user-role="${esc(u.id)}" ${self ? 'disabled title="Você não pode mudar o próprio perfil"' : ''}>${options(K.ROLES.map((r) => ({ value: r.id, label: r.label })), u.papel)}</select></td>
+            <td>${self ? '<span class="badge st st-aprovado">Você</span>' : `<button class="btn sm ${u.ativo ? '' : 'primary'}" data-act="user-toggle" data-id="${esc(u.id)}">${u.ativo ? 'Bloquear' : 'Liberar'}</button>`}</td>
+            <td>${self ? '' : `<button class="btn ghost sm" data-act="user-rename" data-id="${esc(u.id)}">Renomear</button>`}</td>
+          </tr>`; }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="portal-note"><b>Perfis:</b> <b>CEO</b> aprova conteúdos e gerencia acessos. <b>Administrador</b> é da equipe e também gerencia acessos. <b>Equipe</b> cria e move conteúdos e tarefas. <b>Cliente</b> só vê a biblioteca publicada da Área de clientes.</div>`;
+  }
+
+  /* ---------------- Telas de entrada ---------------- */
+  function gate(title, body, actions = '') {
+    return `<div class="gate"><div class="gate-card">
+      <img src="assets/img/logo_on_dark.png" alt="Vindex" class="gate-logo">
+      <div class="gate-tag">HUB · operação de conteúdo</div>
+      <h1>${title}</h1><p>${body}</p>${actions}
+    </div><div class="gate-bars"><span></span><span></span><span></span></div></div>`;
+  }
+
+  function renderGate() {
+    switch (S.status) {
+      case 'loading': return gate('Carregando…', 'Conectando ao Vindex Hub.');
+      case 'config': return gate('Configuração pendente', 'O banco de dados ainda não foi ligado a este site. Falta preencher o arquivo <span class="mono">firebase-config.js</span>.');
+      case 'offline': return gate('Sem conexão', 'Não foi possível carregar o sistema de login. Verifique a internet e recarregue a página.', '<button class="btn primary" data-act="reload">Tentar de novo</button>');
+      case 'login': return gate('Entre para continuar', 'Use a sua conta Google cadastrada pela Vindex.',
+        `<button class="btn google" data-act="login">${I.google}Entrar com Google</button>${S.error ? `<div class="gate-err">${esc(S.error)}</div>` : ''}`);
+      case 'denied': return gate('Acesso não liberado', `A conta <b>${esc(myEmail())}</b> não tem acesso ao Vindex Hub. Peça para a Vindex liberar este e-mail, ou entre com outra conta.`,
+        '<button class="btn primary" data-act="logout">Entrar com outra conta</button>');
+      default: return '';
+    }
+  }
+
   /* ---------------- Camadas: drawer e modal ---------------- */
-  function openLayer(html) {
+  function openLayer(html, kind = '', id = '') {
     closeLayer();
-    const ov = document.getElementById('overlay');
-    ov.hidden = false;
+    document.getElementById('overlay').hidden = false;
     const layer = document.createElement('div');
     layer.id = 'layer';
+    layer.dataset.kind = kind; layer.dataset.id = id;
     layer.innerHTML = html;
     document.body.appendChild(layer);
     const f = layer.querySelector('[autofocus]');
@@ -674,14 +726,18 @@
     const l = document.getElementById('layer');
     if (l) l.remove();
     document.getElementById('overlay').hidden = true;
+    ui.confirmDelete = null;
   }
 
   function openContent(id) {
     const c = content(id);
-    if (!c) return;
-    const task = state.tasks.filter((t) => t.content === id);
+    if (!c) { closeLayer(); return; }
+    const ed = canEditContent();
+    const dis = ed ? '' : 'disabled';
+    const linked = S.tasks.filter((t) => t.content === id);
     openLayer(`<aside class="drawer" role="dialog" aria-label="${esc(c.title)}">
-      <div class="drawer-h"><div><div class="mono muted" style="font-size:11.5px">${c.id} · versão ${c.version}</div><h2>${esc(c.title)}</h2>
+      <div class="drawer-h"><div style="min-width:0;flex:1"><div class="mono muted" style="font-size:11.5px">${code(c)} · versão ${c.version || 1}</div>
+        ${ed ? `<input class="input title-input" data-content-field="title" data-id="${c.id}" value="${esc(c.title)}" aria-label="Título">` : `<h2>${esc(c.title)}</h2>`}
         <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">${stageBadge(c.stage)}<span class="badge fmt">${esc(c.format)}</span>${contentLate(c) ? `<span class="badge late">Atrasado ${-diff(c.due)}d</span>` : ''}</div></div>
         <button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
       <div class="drawer-b">
@@ -689,84 +745,120 @@
           <div style="flex:1"><div class="section-t" style="margin:0 0 3px;color:var(--blue-600)">Próximo passo</div><b>${esc(NEXT_STEP[c.stage])}</b></div>${who(nextOwner(c))}
         </div>
         <dl class="props">
-          <dt>Etapa</dt><dd><select class="input" data-content-field="stage" data-id="${c.id}">${options(SEED.STAGES.map((s) => ({ value: s.id, label: s.label })), c.stage)}</select></dd>
-          <dt>Responsável</dt><dd><select class="input" data-content-field="owner" data-id="${c.id}">${peopleOpts(c.owner)}</select></dd>
-          <dt>Prazo da etapa</dt><dd><input type="date" class="input" data-content-field="due" data-id="${c.id}" value="${c.due}"></dd>
-          <dt>Publicação</dt><dd><input type="date" class="input" data-content-field="publish" data-id="${c.id}" value="${c.publish}"></dd>
-          <dt>Canal · Pilar</dt><dd>${esc(c.channel)} · ${esc(c.pillar)}</dd>
-          <dt>Vídeo</dt><dd>${c.video ? '<span class="badge st st-aprovado">Arquivo anexado</span>' : '<span class="muted">Nenhum arquivo</span>'}</dd>
+          <dt>Etapa</dt><dd><select class="input" data-content-field="stage" data-id="${c.id}" ${ed || isCEO() ? '' : 'disabled'}>${options(K.STAGES.map((s) => ({ value: s.id, label: s.label })), c.stage)}</select></dd>
+          <dt>Responsável</dt><dd><select class="input" data-content-field="owner" data-id="${c.id}" ${dis}>${peopleOpts(c.owner, 'Sem responsável')}</select></dd>
+          <dt>Prazo da etapa</dt><dd><input type="date" class="input" data-content-field="due" data-id="${c.id}" value="${esc(c.due || '')}" ${dis}></dd>
+          <dt>Publicação</dt><dd><input type="date" class="input" data-content-field="publish" data-id="${c.id}" value="${esc(c.publish || '')}" ${dis}></dd>
+          <dt>Formato</dt><dd><select class="input" data-content-field="format" data-id="${c.id}" ${dis}>${options(K.FORMATS, c.format)}</select></dd>
+          <dt>Canal</dt><dd><select class="input" data-content-field="channel" data-id="${c.id}" ${dis}>${options(K.CHANNELS, c.channel)}</select></dd>
+          <dt>Pilar</dt><dd><select class="input" data-content-field="pillar" data-id="${c.id}" ${dis}>${options(K.PILLARS, c.pillar, '—')}</select></dd>
+          <dt>Link do vídeo</dt><dd><input type="url" class="input" data-content-field="video" data-id="${c.id}" value="${esc(c.video || '')}" placeholder="Link do Google Drive ou YouTube" ${dis}></dd>
         </dl>
-        <div><p class="section-t">Roteiro</p><div class="script" style="max-height:220px">${esc(c.script) || '<span class="muted">Ainda não escrito.</span>'}</div></div>
-        ${task.length ? `<div><p class="section-t">Tarefas ligadas</p>${task.map((t) => `<div style="display:flex;gap:8px;align-items:center;font-size:13px;padding:4px 0">${avatar(t.owner)}<span style="flex:1">${esc(t.title)}</span><span class="badge">${t.status}</span></div>`).join('')}</div>` : ''}
-        <div><p class="section-t">Comentários</p>${thread(c)}</div>
-        <div><p class="section-t">Histórico</p><div class="hist">${c.history.slice().reverse().map((h) => `<div><span class="when">${fmt(h.date)}</span><span>${esc(h.text)}</span></div>`).join('')}</div></div>
+        <div><p class="section-t">Roteiro</p>
+          ${ed ? `<textarea class="input" id="ed-script" rows="8">${esc(c.script || '')}</textarea>` : `<div class="script">${esc(c.script) || '<span class="muted">Ainda não escrito.</span>'}</div>`}</div>
+        <div><p class="section-t">Legenda do post</p>
+          ${ed ? `<textarea class="input" id="ed-caption" rows="4">${esc(c.caption || '')}</textarea>` : `<div class="script">${esc(c.caption) || '<span class="muted">Sem legenda.</span>'}</div>`}</div>
+        ${ed ? `<div style="display:flex;justify-content:flex-end"><button class="btn primary sm" data-act="save-texts" data-id="${c.id}">Salvar roteiro e legenda</button></div>` : ''}
+        ${linked.length ? `<div><p class="section-t">Tarefas ligadas</p>${linked.map((t) => `<div style="display:flex;gap:8px;align-items:center;font-size:13px;padding:4px 0">${avatar(t.owner)}<span style="flex:1">${esc(t.title)}</span><span class="badge">${esc(t.status)}</span></div>`).join('')}</div>` : ''}
+        <div><p class="section-t">Comentários</p>${thread(c, 'd-thread')}
+          <div style="margin-top:8px;display:flex;gap:8px"><input class="input" id="d-comment" placeholder="Escreva um comentário…"><button class="btn" data-act="d-comment" data-id="${c.id}">Enviar</button></div></div>
+        <div><p class="section-t">Histórico</p><div class="hist">${(c.history || []).slice().sort((a, b) => String(b.at).localeCompare(String(a.at))).map((h) => `<div><span class="when">${fmt(h.at)}</span><span>${esc(h.text)}${h.by ? ` · <span class="muted">${esc(person(h.by).name)}</span>` : ''}</span></div>`).join('')}</div></div>
       </div>
       <div class="drawer-f">
+        ${ed ? `<button class="btn ghost sm danger-txt" data-act="del-content" data-id="${c.id}">${ui.confirmDelete === c.id ? 'Clique de novo para excluir' : 'Excluir'}</button><span style="flex:1"></span>` : ''}
         <button class="btn" data-act="close">Fechar</button>
-        ${['aguardando_aprovacao', 'ajustes', 'aprovado'].includes(c.stage) ? `<button class="btn primary" data-act="review" data-id="${c.id}">Abrir na Central de aprovação ${I.arrow}</button>` : ''}
+        ${['aguardando_aprovacao', 'ajustes', 'aprovado'].includes(c.stage) ? `<button class="btn primary" data-act="review" data-id="${c.id}">Central de aprovação ${I.arrow}</button>` : ''}
       </div>
-    </aside>`);
+    </aside>`, 'content', id);
   }
 
   function openTask(id) {
+    const t = S.tasks.find((x) => x.id === id);
     location.hash = '#/tarefas';
-    const t = state.tasks.find((x) => x.id === id);
-    if (t) { ui.tasks.q = t.title; ui.tasks.hideDone = false; }
+    if (t) { ui.tasks.q = t.title; ui.tasks.hideDone = false; ui.tasks.late = false; ui.tasks.ceo = false; }
     render();
   }
 
-  function newContentModal() {
+  function contentModal() {
     openLayer(`<div class="modal" role="dialog" aria-label="Novo conteúdo">
-      <div class="drawer-h"><div><div class="eyebrow mono" style="font-size:11px;color:var(--blue);letter-spacing:.14em;text-transform:uppercase">Nova pauta</div><h2>Novo conteúdo</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
-      <form class="form" id="f-content">
-        <div class="field full"><label>Título</label><input class="input" name="title" required autofocus placeholder="Ex.: Como calcular o lucro real de um pedido"></div>
-        <div class="field"><label>Formato</label><select class="input" name="format">${options(SEED.FORMATS, 'Reels')}</select></div>
-        <div class="field"><label>Canal</label><select class="input" name="channel">${options(SEED.CHANNELS, 'Instagram')}</select></div>
-        <div class="field"><label>Responsável</label><select class="input" name="owner">${peopleOpts('marina')}</select></div>
-        <div class="field"><label>Publicação prevista</label><input class="input" type="date" name="publish" value="${offset(14)}"></div>
-        <div class="field full"><label>Pilar</label><select class="input" name="pillar">${options(['Lucro', 'Fluxo de caixa', 'Marketplaces', 'Impostos', 'Gestão', 'Institucional'], 'Lucro')}</select></div>
+      <div class="drawer-h"><div><div class="mono" style="font-size:11px;color:var(--blue);letter-spacing:.14em;text-transform:uppercase">Nova pauta</div><h2>Novo conteúdo</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
+      <form class="form" id="f-content" onsubmit="return false">
+        <div class="field full"><label>Título</label><input class="input" name="title" required autofocus maxlength="160" placeholder="Ex.: Como calcular o lucro real de um pedido"></div>
+        <div class="field"><label>Formato</label><select class="input" name="format">${options(K.FORMATS, 'Reels')}</select></div>
+        <div class="field"><label>Canal</label><select class="input" name="channel">${options(K.CHANNELS, 'Instagram')}</select></div>
+        <div class="field"><label>Responsável</label><select class="input" name="owner">${peopleOpts(myEmail())}</select></div>
+        <div class="field"><label>Etapa</label><select class="input" name="stage">${options(K.STAGES.filter((s) => s.id !== 'aprovado').map((s) => ({ value: s.id, label: s.label })), 'pauta')}</select></div>
+        <div class="field"><label>Prazo da etapa</label><input class="input" type="date" name="due" value="${offset(3)}"></div>
+        <div class="field"><label>Publicação prevista</label><input class="input" type="date" name="publish" value="${offset(7)}"></div>
+        <div class="field full"><label>Pilar</label><select class="input" name="pillar">${options(K.PILLARS, 'Lucro', '—')}</select></div>
       </form>
-      <div class="drawer-f"><button class="btn" data-act="close">Cancelar</button><button class="btn primary" data-act="save-content">Criar na etapa Pauta</button></div>
-    </div>`);
+      <div class="drawer-f"><button class="btn" data-act="close">Cancelar</button><button class="btn primary" data-act="save-content">Criar conteúdo</button></div>
+    </div>`, 'modal');
   }
 
-  function newTaskModal() {
-    openLayer(`<div class="modal" role="dialog" aria-label="Nova tarefa">
-      <div class="drawer-h"><div><h2>Nova tarefa</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
-      <form class="form" id="f-task">
-        <div class="field full"><label>Tarefa</label><input class="input" name="title" required autofocus placeholder="O que precisa ser feito?"></div>
-        <div class="field"><label>Responsável</label><select class="input" name="owner">${peopleOpts(me() || 'marina')}</select></div>
-        <div class="field"><label>Prazo</label><input class="input" type="date" name="due" value="${offset(2)}"></div>
-        <div class="field"><label>Prioridade</label><select class="input" name="priority">${options(PRIORITIES, 'Média')}</select></div>
-        <div class="field"><label>Conteúdo ligado (opcional)</label><select class="input" name="content">${options(state.contents.filter((c) => c.stage !== 'publicado').map((c) => ({ value: c.id, label: `${c.id} · ${c.title.slice(0, 34)}` })), '', 'Nenhum')}</select></div>
-        <label class="chip-toggle full"><input type="checkbox" name="ceo">Esta tarefa depende da CEO</label>
+  function taskModal(id) {
+    const t = id ? S.tasks.find((x) => x.id === id) : null;
+    const v = t || { title: '', owner: myEmail(), due: offset(2), priority: 'Média', ceo: false, content: '', note: '' };
+    openLayer(`<div class="modal" role="dialog" aria-label="${t ? 'Editar tarefa' : 'Nova tarefa'}">
+      <div class="drawer-h"><div><h2>${t ? 'Editar tarefa' : 'Nova tarefa'}</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
+      <form class="form" id="f-task" onsubmit="return false">
+        <div class="field full"><label>Tarefa</label><input class="input" name="title" required autofocus maxlength="200" value="${esc(v.title)}" placeholder="O que precisa ser feito?"></div>
+        <div class="field"><label>Responsável</label><select class="input" name="owner">${peopleOpts(v.owner)}</select></div>
+        <div class="field"><label>Prazo</label><input class="input" type="date" name="due" value="${esc(v.due || '')}"></div>
+        <div class="field"><label>Prioridade</label><select class="input" name="priority">${options(PRIORITIES, v.priority)}</select></div>
+        <div class="field"><label>Conteúdo ligado (opcional)</label><select class="input" name="content">${options(S.contents.filter((c) => c.stage !== 'publicado' || c.id === v.content).map((c) => ({ value: c.id, label: `${code(c)} · ${c.title.slice(0, 34)}` })), v.content || '', 'Nenhum')}</select></div>
+        <div class="field full"><label>Observação (opcional)</label><input class="input" name="note" maxlength="200" value="${esc(v.note || '')}" placeholder="Ex.: aguardando cenário"></div>
+        <label class="chip-toggle full"><input type="checkbox" name="ceo" ${v.ceo ? 'checked' : ''}>Esta tarefa depende da CEO</label>
       </form>
-      <div class="drawer-f"><button class="btn" data-act="close">Cancelar</button><button class="btn primary" data-act="save-task">Criar tarefa</button></div>
-    </div>`);
+      <div class="drawer-f">${t ? `<button class="btn ghost sm danger-txt" data-act="del-task" data-id="${t.id}">${ui.confirmDelete === t.id ? 'Clique de novo para excluir' : 'Excluir'}</button><span style="flex:1"></span>` : ''}
+        <button class="btn" data-act="close">Cancelar</button><button class="btn primary" data-act="save-task" data-id="${t ? t.id : ''}">${t ? 'Salvar' : 'Criar tarefa'}</button></div>
+    </div>`, 'modal');
+  }
+
+  function libModal(id) {
+    const l = id ? S.library.find((x) => x.id === id) : null;
+    const v = l || { tipo: 'video', titulo: '', categoria: K.LIB_CATS[0], link: '', duracao: '', nivel: 'Essencial', arquivo: 'PDF', publicado: false };
+    openLayer(`<div class="modal" role="dialog" aria-label="Item da biblioteca">
+      <div class="drawer-h"><div><h2>${l ? 'Editar item' : 'Novo item da biblioteca'}</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
+      <form class="form" id="f-lib" onsubmit="return false">
+        <div class="field"><label>Tipo</label><select class="input" name="tipo">${options([{ value: 'video', label: 'Vídeo' }, { value: 'material', label: 'Material' }], v.tipo)}</select></div>
+        <div class="field"><label>Categoria</label><select class="input" name="categoria">${options(K.LIB_CATS, v.categoria)}</select></div>
+        <div class="field full"><label>Título</label><input class="input" name="titulo" required autofocus maxlength="160" value="${esc(v.titulo)}"></div>
+        <div class="field full"><label>Link (Google Drive, YouTube não listado, PDF…)</label><input class="input" type="url" name="link" required value="${esc(v.link)}" placeholder="https://"></div>
+        <div class="field"><label>Duração (vídeo)</label><input class="input" name="duracao" maxlength="10" value="${esc(v.duracao || '')}" placeholder="12:40"></div>
+        <div class="field"><label>Nível (vídeo)</label><select class="input" name="nivel">${options(K.LEVELS, v.nivel)}</select></div>
+        <div class="field"><label>Tipo de arquivo (material)</label><input class="input" name="arquivo" maxlength="5" value="${esc(v.arquivo || '')}" placeholder="PDF"></div>
+        <label class="chip-toggle" style="align-self:end"><input type="checkbox" name="publicado" ${v.publicado ? 'checked' : ''}>Publicado para clientes</label>
+      </form>
+      <div class="drawer-f">${l ? `<button class="btn ghost sm danger-txt" data-act="del-lib" data-id="${l.id}">${ui.confirmDelete === l.id ? 'Clique de novo para excluir' : 'Excluir'}</button><span style="flex:1"></span>` : ''}
+        <button class="btn" data-act="close">Cancelar</button><button class="btn primary" data-act="save-lib" data-id="${l ? l.id : ''}">Salvar</button></div>
+    </div>`, 'modal');
+  }
+
+  function userModal() {
+    openLayer(`<div class="modal" role="dialog" aria-label="Adicionar pessoa">
+      <div class="drawer-h"><div><h2>Adicionar pessoa</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
+      <form class="form" id="f-user" onsubmit="return false">
+        <div class="field full"><label>Nome</label><input class="input" name="nome" required autofocus maxlength="80" placeholder="Ex.: Juliana Souza"></div>
+        <div class="field full"><label>E-mail da conta Google</label><input class="input" type="email" name="email" required placeholder="nome@gmail.com"></div>
+        <div class="field full"><label>Perfil</label><select class="input" name="papel">${options(K.ROLES.map((r) => ({ value: r.id, label: r.label })), 'equipe')}</select></div>
+      </form>
+      <div class="drawer-f"><button class="btn" data-act="close">Cancelar</button><button class="btn primary" data-act="save-user">Liberar acesso</button></div>
+    </div>`, 'modal');
   }
 
   function watchModal(id) {
-    const v = SEED.LIBRARY.find((l) => l.id === id);
-    if (!state.watched.includes(id) && v.video) { state.watched.push(id); save(); }
-    openLayer(`<div class="modal" style="width:min(820px,calc(100vw - 32px))" role="dialog" aria-label="${esc(v.title)}">
-      <div class="drawer-h"><div><div class="mono muted" style="font-size:11px">${esc(v.cat)} · ${v.dur}</div><h2>${esc(v.title)}</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
-      <div style="padding:6px 22px 22px">${v.video
-        ? `<div class="player"><video src="${esc(v.video)}" controls autoplay playsinline></video></div><p class="muted" style="font-size:12px;margin:10px 0 0">Neste protótipo, o vídeo institucional da Vindex é usado como exemplo de aula.</p>`
-        : `<div class="player"><div class="none">${I.film}<b>Aula de demonstração</b><p>Este vídeo ainda não existe. No sistema real, ele viria de um serviço de vídeo com link temporário, visível só para clientes com acesso.</p></div></div>`}</div>
-    </div>`);
-  }
-
-  function aboutModal() {
-    openLayer(`<div class="modal" style="width:min(600px,calc(100vw - 32px))" role="dialog" aria-label="Sobre o protótipo">
-      <div class="drawer-h"><div><h2>O que é real neste protótipo</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
-      <div style="padding:4px 22px 18px;font-size:13.5px;line-height:1.6">
-        <p style="margin-top:0"><b>Funciona de verdade:</b> navegação, filtros, mover cards, criar conteúdos e tarefas, comentar, aprovar e pedir ajustes.</p>
-        <p><b>Mas é só demonstração:</b> todas as alterações ficam salvas <b>apenas neste navegador</b>. Outra pessoa não vê o que você mudou. Não há login: o seletor “Visualizar como” só troca a visão, não protege nada.</p>
-        <p><b>Não existe ainda:</b> upload de arquivos, banco de dados, contas de usuário, e-mails e downloads da área de clientes. Todos os nomes, empresas e números são fictícios.</p>
-        <p style="margin-bottom:0">O plano para transformar isto num sistema real está no arquivo <span class="mono">ARQUITETURA.md</span>, dentro da pasta do projeto.</p>
-      </div>
-      <div class="drawer-f"><button class="btn adjust" data-act="reset">Restaurar dados de exemplo</button><button class="btn primary" data-act="close">Entendi</button></div>
-    </div>`);
+    const v = S.library.find((l) => l.id === id);
+    if (!v) return;
+    const m = media(v.link);
+    const body = !m ? '<div class="none"><b>Link inválido</b></div>'
+      : m.type === 'iframe' ? `<iframe src="${esc(m.src)}" allow="autoplay; encrypted-media; fullscreen" allowfullscreen title="${esc(v.titulo)}"></iframe>`
+      : m.type === 'video' ? `<video src="${esc(m.src)}" controls autoplay playsinline></video>`
+      : `<div class="none">${I.link}<b>Abrir vídeo</b><p></p><a class="btn sm" href="${esc(m.src)}" target="_blank" rel="noopener">Abrir em nova aba</a></div>`;
+    openLayer(`<div class="modal" style="width:min(860px,calc(100vw - 32px))" role="dialog" aria-label="${esc(v.titulo)}">
+      <div class="drawer-h"><div><div class="mono muted" style="font-size:11px">${esc(v.categoria || '')}${v.duracao ? ' · ' + esc(v.duracao) : ''}</div><h2>${esc(v.titulo)}</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
+      <div style="padding:6px 22px 22px"><div class="player">${body}</div></div>
+    </div>`, 'modal');
   }
 
   /* ---------------- Render ---------------- */
@@ -774,29 +866,67 @@
     const active = document.activeElement;
     const focusId = active && active.id;
     const caret = active && typeof active.selectionStart === 'number' ? active.selectionStart : null;
-    const vid = document.getElementById('review-video');
-    const vstate = vid ? { src: vid.getAttribute('src'), t: vid.currentTime } : null;
     const draft = document.getElementById('ap-comment');
     const draftText = draft ? draft.value : '';
 
     const app = document.getElementById('app');
-    if (state.profile === 'cliente') {
+    if (S.status !== 'app') {
+      app.innerHTML = renderGate();
+      document.title = 'Vindex Hub';
+      return;
+    }
+    if (role() === 'cliente') {
       app.innerHTML = portal();
+      document.title = 'Área do cliente · Vindex Hub';
     } else {
-      if (location.hash.startsWith('#/portal')) location.hash = '#/dashboard';
       const route = currentRoute();
       app.innerHTML = shell(route);
       document.title = `${route.label} · Vindex Hub`;
     }
-
     if (focusId) {
       const el = document.getElementById(focusId);
-      if (el) { el.focus(); if (caret !== null && el.setSelectionRange) el.setSelectionRange(caret, caret); }
+      if (el) { el.focus(); if (caret !== null && el.setSelectionRange) try { el.setSelectionRange(caret, caret); } catch (e) { /* campo sem cursor */ } }
     }
-    const nv = document.getElementById('review-video');
-    if (nv && vstate && nv.getAttribute('src') === vstate.src) nv.currentTime = vstate.t;
     const nd = document.getElementById('ap-comment');
     if (nd && draftText) nd.value = draftText;
+  }
+
+  // Atualizações que chegam do banco. Na Central de aprovação, se só chegaram comentários
+  // do conteúdo aberto, atualiza apenas a conversa para não reiniciar o vídeo que está tocando.
+  let pending = false;
+  let lastApprovalSig = '';
+  function approvalSig() {
+    const c = content(ui.approval.selected);
+    const l = approvalLists();
+    return [ui.approval.tab, ui.approval.selected, c && c.stage, c && c.version, c && c.video, c && c.script, c && c.caption,
+      l.aguardando.length, l.ajustes.length, l.aprovados.length].join('|');
+  }
+  function scheduleRender() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      const onApproval = S.status === 'app' && role() !== 'cliente' && currentRoute().id === 'aprovacoes' && !document.getElementById('layer');
+      const sig = onApproval ? approvalSig() : '';
+      if (onApproval && sig === lastApprovalSig && document.querySelector('.review-main .player')) { refreshSideOnly(); return; }
+      lastApprovalSig = sig;
+      render();
+      refreshLayer();
+    });
+  }
+  function refreshSideOnly() {
+    const c = content(ui.approval.selected);
+    const th = document.getElementById('thread');
+    if (c && th) th.outerHTML = thread(c);
+  }
+  // Mantém o card aberto atualizado (comentários, histórico) sem perder o que está sendo digitado.
+  function refreshLayer() {
+    const l = document.getElementById('layer');
+    if (!l || l.dataset.kind !== 'content') return;
+    const c = content(l.dataset.id);
+    if (!c) { closeLayer(); return; }
+    const th = document.getElementById('d-thread');
+    if (th) th.outerHTML = thread(c, 'd-thread');
   }
 
   function setFilter(path, value) {
@@ -805,8 +935,51 @@
     render();
   }
 
+  /* ---------------- Sessão e dados ---------------- */
+  function stopWatching() { S.unsubs.forEach((u) => u()); S.unsubs = []; }
+
+  function watchAll() {
+    stopWatching();
+    const onErr = (e) => { console.error(e); toast('Sem permissão para ler alguns dados', 'regra de acesso'); };
+    const sub = (col, key, filter) => S.unsubs.push(VH.watch(col, (rows) => { S[key] = rows; scheduleRender(); }, onErr, filter));
+    if (role() === 'cliente') {
+      sub('biblioteca', 'library', ['publicado', true]);
+      return;
+    }
+    sub('usuarios', 'users');
+    sub('conteudos', 'contents');
+    sub('tarefas', 'tasks');
+    sub('biblioteca', 'library');
+  }
+
+  function start() {
+    if (start.done) return;
+    start.done = true;
+    if (!window.VH) { S.status = window.VINDEX_FIREBASE_CONFIG ? 'offline' : 'config'; render(); return; }
+    VH.onAuth(async (u) => {
+      stopWatching();
+      S.authUser = u; S.me = null; S.users = []; S.contents = []; S.tasks = []; S.library = [];
+      if (!u) { S.status = 'login'; render(); return; }
+      S.status = 'loading'; render();
+      try {
+        const me = await VH.getUser(u.email.toLowerCase());
+        if (!me || !me.ativo) { S.status = 'denied'; render(); return; }
+        S.me = me;
+        S.users = [{ id: u.email.toLowerCase(), ...me }];
+        S.status = 'app';
+        watchAll();
+        render();
+      } catch (e) {
+        console.error(e);
+        S.status = 'denied'; render();
+      }
+    });
+  }
+
   /* ---------------- Eventos ---------------- */
-  document.addEventListener('click', (e) => {
+  const val = (id) => { const el = document.getElementById(id); return el ? el.value : ''; };
+
+  document.addEventListener('click', async (e) => {
     if (e.target.id === 'overlay') { closeLayer(); return; }
     const el = e.target.closest('[data-act]');
     if (!el) {
@@ -818,72 +991,150 @@
     if (el.tagName === 'INPUT' && el.type === 'checkbox' && act !== 'task-done') return;
 
     switch (act) {
+      case 'login':
+        S.error = '';
+        try { await VH.signIn(); } catch (err) {
+          if (!/popup-closed|cancelled-popup/.test(String(err.code))) { S.error = 'Não foi possível entrar. Tente de novo.'; render(); }
+        }
+        break;
+      case 'logout': closeLayer(); await VH.signOut(); location.hash = ''; break;
+      case 'reload': location.reload(); break;
       case 'nav': ui.navOpen = !ui.navOpen; render(); break;
       case 'go': {
         const [route, flag] = id.split('?');
         if (route === 'tarefas' && flag === 'late') { ui.tasks.late = true; ui.tasks.ceo = false; ui.tasks.q = ''; }
         location.hash = '#/' + route; break;
       }
-      case 'about': aboutModal(); break;
       case 'close': closeLayer(); break;
-      case 'reset':
-        try { localStorage.removeItem(STORE_KEY); } catch (err) { /* sem armazenamento */ }
-        state = freshState(); ui.localVideo = {}; closeLayer(); render(); toast('Dados de exemplo restaurados', ''); break;
-      case 'profile':
-        state.profile = id; save(); closeLayer();
-        if (id === 'cliente') { ui.portal.tab = 'videos'; location.hash = '#/portal'; }
-        else if (location.hash.startsWith('#/portal') || !location.hash) location.hash = '#/dashboard';
-        render(); window.scrollTo(0, 0);
-        toast(`Visualizando como ${PROFILES[id].label}`, 'demonstração · não é login'); break;
       case 'content': e.stopPropagation(); openContent(id); break;
       case 'task': openTask(id); break;
-      case 'review':
+      case 'review': {
         closeLayer();
-        { const c = content(id); ui.approval.tab = c.stage === 'ajustes' ? 'ajustes' : c.stage === 'aguardando_aprovacao' ? 'aguardando' : 'aprovados'; ui.approval.selected = id; }
+        const c = content(id);
+        ui.approval.tab = c.stage === 'ajustes' ? 'ajustes' : c.stage === 'aguardando_aprovacao' ? 'aguardando' : 'aprovados';
+        ui.approval.selected = id;
         if (location.hash !== '#/aprovacoes') location.hash = '#/aprovacoes'; else render();
         break;
-      case 'new-content': newContentModal(); break;
-      case 'new-task': newTaskModal(); break;
+      }
+      case 'new-content': contentModal(); break;
+      case 'new-task': taskModal(); break;
+      case 'edit-task': taskModal(id); break;
+      case 'new-lib': libModal(); break;
+      case 'edit-lib': libModal(id); break;
+      case 'new-user': userModal(); break;
       case 'save-content': {
         const f = document.getElementById('f-content');
         if (!f.reportValidity()) return;
         const d = Object.fromEntries(new FormData(f));
-        const pub = d.publish || offset(14);
-        const c = { id: `C-${state.seq.c++}`, title: d.title.trim(), format: d.format, channel: d.channel, stage: 'pauta', owner: d.owner, due: iso(addDays(parse(pub), -7)), publish: pub, pillar: d.pillar, video: null, version: 1, script: '', comments: [], history: [{ date: iso(TODAY), text: `Pauta criada por ${person(me()).name}` }] };
-        state.contents.push(c); save(); closeLayer(); render(); toast(`${c.id} criado em Pauta`); break;
+        el.disabled = true;
+        try {
+          await VH.add('conteudos', {
+            title: d.title.trim(), format: d.format, channel: d.channel, stage: d.stage, owner: d.owner || '',
+            due: d.due || '', publish: d.publish || '', pillar: d.pillar || '', video: '', version: 1, script: '', caption: '',
+            comments: [], history: [H(`Conteúdo criado em ${stageLabel(d.stage)}`)], createdAt: nowIso(), createdBy: myEmail()
+          });
+          closeLayer(); toast('Conteúdo criado');
+        } catch (err) { fail(err); el.disabled = false; }
+        break;
       }
       case 'save-task': {
         const f = document.getElementById('f-task');
         if (!f.reportValidity()) return;
         const d = Object.fromEntries(new FormData(f));
-        const t = { id: `T-${pad(state.seq.t++)}`, title: d.title.trim(), owner: d.owner, due: d.due || offset(2), priority: d.priority, status: 'A fazer', ceo: !!d.ceo, content: d.content || null, note: '' };
-        state.tasks.push(t); save(); closeLayer(); render(); toast(`Tarefa ${t.id} criada`); break;
+        const data = { title: d.title.trim(), owner: d.owner || '', due: d.due || '', priority: d.priority, ceo: !!d.ceo, content: d.content || null, note: (d.note || '').trim() };
+        el.disabled = true;
+        try {
+          if (id) await VH.update('tarefas', id, data);
+          else await VH.add('tarefas', { ...data, status: 'A fazer', createdAt: nowIso(), createdBy: myEmail() });
+          closeLayer(); toast(id ? 'Tarefa salva' : 'Tarefa criada');
+        } catch (err) { fail(err); el.disabled = false; }
+        break;
+      }
+      case 'save-lib': {
+        const f = document.getElementById('f-lib');
+        if (!f.reportValidity()) return;
+        const d = Object.fromEntries(new FormData(f));
+        const link = safeUrl(d.link);
+        if (!link) { toast('Link inválido', 'use um endereço que começa com https://'); return; }
+        const data = { tipo: d.tipo, categoria: d.categoria, titulo: d.titulo.trim(), link, duracao: d.duracao.trim(), nivel: d.nivel, arquivo: d.arquivo.trim(), publicado: !!d.publicado };
+        try {
+          if (id) await VH.update('biblioteca', id, data); else await VH.add('biblioteca', { ...data, createdAt: nowIso() });
+          closeLayer(); toast('Biblioteca atualizada');
+        } catch (err) { fail(err); }
+        break;
+      }
+      case 'save-user': {
+        const f = document.getElementById('f-user');
+        if (!f.reportValidity()) return;
+        const d = Object.fromEntries(new FormData(f));
+        const email = d.email.trim().toLowerCase();
+        if (S.users.find((u) => u.id === email)) { toast('Este e-mail já está cadastrado'); return; }
+        try { await VH.set('usuarios', email, { nome: d.nome.trim(), papel: d.papel, ativo: true, criadoEm: nowIso(), criadoPor: myEmail() }); closeLayer(); toast(`Acesso liberado para ${d.nome.trim()}`); } catch (err) { fail(err); }
+        break;
+      }
+      case 'user-toggle': {
+        const u = S.users.find((x) => x.id === id);
+        try { await VH.update('usuarios', id, { ativo: !u.ativo }); toast(u.ativo ? 'Acesso bloqueado' : 'Acesso liberado'); } catch (err) { fail(err); }
+        break;
+      }
+      case 'user-rename': {
+        const u = S.users.find((x) => x.id === id);
+        openLayer(`<div class="modal" role="dialog" aria-label="Renomear"><div class="drawer-h"><div><h2>Renomear</h2></div><button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
+          <form class="form" onsubmit="return false"><div class="field full"><label>Nome</label><input class="input" id="rn-nome" autofocus maxlength="80" value="${esc(u.nome)}"></div></form>
+          <div class="drawer-f"><button class="btn" data-act="close">Cancelar</button><button class="btn primary" data-act="save-rename" data-id="${esc(id)}">Salvar</button></div></div>`, 'modal');
+        break;
+      }
+      case 'save-rename': {
+        const nome = val('rn-nome').trim();
+        if (!nome) return;
+        try { await VH.update('usuarios', id, { nome }); closeLayer(); toast('Nome atualizado'); } catch (err) { fail(err); }
+        break;
+      }
+      case 'save-texts': {
+        try { await VH.push('conteudos', id, 'history', H('Roteiro/legenda atualizados'), { script: val('ed-script'), caption: val('ed-caption') }); toast('Roteiro e legenda salvos'); } catch (err) { fail(err); }
+        break;
+      }
+      case 'd-comment': {
+        const txt = val('d-comment').trim();
+        if (!txt) return;
+        document.getElementById('d-comment').value = '';
+        await addComment(id, txt);
+        break;
+      }
+      case 'del-content': case 'del-task': case 'del-lib': {
+        if (ui.confirmDelete !== id) { ui.confirmDelete = id; el.textContent = 'Clique de novo para excluir'; return; }
+        const col = { 'del-content': 'conteudos', 'del-task': 'tarefas', 'del-lib': 'biblioteca' }[act];
+        try { await VH.remove(col, id); closeLayer(); toast('Excluído'); } catch (err) { fail(err); }
+        break;
       }
       case 'clear-kanban': ui.kanban = { q: '', owner: '', format: '', channel: '', late: false }; render(); break;
       case 'ap-tab': ui.approval.tab = id; ui.approval.selected = null; render(); break;
       case 'ap-select': ui.approval.selected = id; render(); break;
-      case 'approve':
+      case 'approve': {
         if (!isCEO()) return;
-        decide(id, 'aprovado', (document.getElementById('ap-comment').value || '').trim() || 'Aprovado.');
-        document.getElementById('ap-comment').value = '';
-        render(); toast('Conteúdo aprovado e registrado no histórico'); break;
+        const box = document.getElementById('ap-comment');
+        const txt = box.value.trim();
+        box.value = '';
+        if (await decide(id, 'aprovado', txt || 'Aprovado.')) toast('Conteúdo aprovado e registrado');
+        break;
+      }
       case 'adjust': {
         if (!isCEO()) return;
         const box = document.getElementById('ap-comment');
         const txt = box.value.trim();
-        if (!txt) { box.focus(); box.style.borderColor = 'var(--danger)'; toast('Escreva no comentário o que precisa mudar', ''); return; }
+        if (!txt) { box.focus(); box.style.borderColor = 'var(--danger)'; toast('Escreva no comentário o que precisa mudar'); return; }
         box.value = '';
-        decide(id, 'ajustes', withTime(txt)); render(); toast('Ajustes solicitados à equipe'); break;
+        if (await decide(id, 'ajustes', txt)) toast('Ajustes solicitados à equipe');
+        break;
       }
-      case 'resubmit': moveStage(id, 'aguardando_aprovacao'); ui.approval.tab = 'aguardando'; ui.approval.selected = id; render(); toast('Reenviado para aprovação'); break;
-      case 'schedule': moveStage(id, 'agendado'); render(); toast('Marcado como agendado'); break;
+      case 'resubmit': if (await moveStage(id, 'aguardando_aprovacao')) { ui.approval.tab = 'aguardando'; ui.approval.selected = id; toast('Reenviado para aprovação'); } break;
+      case 'schedule': if (await moveStage(id, 'agendado')) toast('Marcado como agendado'); break;
       case 'comment': {
         const box = document.getElementById('ap-comment');
         const txt = box.value.trim();
         if (!txt) { box.focus(); return; }
         box.value = '';
-        addComment(id, withTime(txt)); render(); toast('Comentário adicionado');
-        const th = document.getElementById('thread'); if (th) th.scrollTop = th.scrollHeight;
+        await addComment(id, txt);
         break;
       }
       case 'cal-prev': case 'cal-next': {
@@ -893,35 +1144,28 @@
       case 'cal-today': ui.cal.month = TODAY.getMonth(); ui.cal.year = TODAY.getFullYear(); render(); break;
       case 'cal-view': ui.cal.view = id; render(); break;
       case 'task-done': {
-        const t = state.tasks.find((x) => x.id === id);
-        t.status = el.checked ? 'Concluída' : 'A fazer'; save(); render();
-        toast(el.checked ? 'Tarefa concluída' : 'Tarefa reaberta'); break;
+        const t = S.tasks.find((x) => x.id === id);
+        try { await VH.update('tarefas', id, { status: el.checked ? 'Concluída' : 'A fazer' }); toast(el.checked ? 'Tarefa concluída' : 'Tarefa reaberta'); } catch (err) { fail(err); el.checked = t.status === 'Concluída'; }
+        break;
       }
       case 'task-ceo': {
-        const t = state.tasks.find((x) => x.id === id);
-        t.ceo = !t.ceo; save(); render(); toast(t.ceo ? 'Marcada: depende da CEO' : 'Marcador da CEO removido'); break;
+        const t = S.tasks.find((x) => x.id === id);
+        try { await VH.update('tarefas', id, { ceo: !t.ceo }); } catch (err) { fail(err); }
+        break;
       }
       case 'portal-tab': ui.portal.tab = id; render(); break;
       case 'portal-cat': ui.portal.cat = id; render(); break;
       case 'watch': watchModal(id); break;
-      case 'download': toast('Download indisponível no protótipo', 'precisa do armazenamento de arquivos'); break;
       default: break;
     }
   });
-
-  function withTime(txt) {
-    const cb = document.getElementById('ap-time');
-    const v = document.getElementById('review-video');
-    if (cb && cb.checked && v) { const s = Math.floor(v.currentTime); return `[${Math.floor(s / 60)}:${pad(s % 60)}] ${txt}`; }
-    return txt;
-  }
 
   document.addEventListener('input', (e) => {
     const f = e.target.dataset.filter;
     if (f && e.target.type !== 'checkbox' && e.target.tagName === 'INPUT') setFilter(f, e.target.value);
   });
 
-  document.addEventListener('change', (e) => {
+  document.addEventListener('change', async (e) => {
     const t = e.target;
     if (t.dataset.filter) {
       if (t.type === 'checkbox') setFilter(t.dataset.filter, t.checked);
@@ -929,26 +1173,25 @@
       return;
     }
     if (t.dataset.taskStatus) {
-      const task = state.tasks.find((x) => x.id === t.dataset.taskStatus);
-      task.status = t.value; save(); render(); toast(`Status: ${t.value}`); return;
+      try { await VH.update('tarefas', t.dataset.taskStatus, { status: t.value }); toast(`Status: ${t.value}`); } catch (err) { fail(err); }
+      return;
+    }
+    if (t.dataset.userRole) {
+      try { await VH.update('usuarios', t.dataset.userRole, { papel: t.value }); toast('Perfil atualizado'); } catch (err) { fail(err); }
+      return;
     }
     if (t.dataset.contentField) {
       const c = content(t.dataset.id); const field = t.dataset.contentField;
+      if (!c) return;
       if (field === 'stage') {
-        if (!moveStage(c.id, t.value)) { t.value = c.stage; return; }
-        toast(`Movido para ${stageLabel(t.value)}`);
-      } else if (t.value) {
-        c[field] = t.value;
-        c.history.push({ date: iso(TODAY), text: field === 'owner' ? `Responsável alterado para ${person(t.value).name}` : field === 'due' ? `Prazo alterado para ${fmt(t.value)}` : `Publicação alterada para ${fmt(t.value)}` });
-        save(); toast('Alteração salva');
+        if (await moveStage(c.id, t.value)) { toast(`Movido para ${stageLabel(t.value)}`); openContent(c.id); } else t.value = c.stage;
+        return;
       }
-      render(); openContent(c.id); return;
-    }
-    if (t.dataset.localVideo && t.files && t.files[0]) {
-      const old = ui.localVideo[t.dataset.localVideo];
-      if (old) URL.revokeObjectURL(old);
-      ui.localVideo[t.dataset.localVideo] = URL.createObjectURL(t.files[0]);
-      render(); toast('Pré-visualização local carregada', 'o arquivo não foi enviado');
+      let value = t.value;
+      if (field === 'title') { value = value.trim(); if (!value) { t.value = c.title; return; } }
+      if (field === 'video' && value && !safeUrl(value)) { toast('Link inválido', 'use um endereço que começa com https://'); t.value = c.video || ''; return; }
+      const labels = { title: 'Título alterado', owner: `Responsável: ${person(value).name}`, due: `Prazo: ${fmt(value)}`, publish: `Publicação: ${fmt(value)}`, format: `Formato: ${value}`, channel: `Canal: ${value}`, pillar: `Pilar: ${value || '—'}`, video: value ? 'Link do vídeo atualizado' : 'Link do vídeo removido' };
+      try { await VH.push('conteudos', c.id, 'history', H(labels[field] || 'Alterado'), { [field]: value }); toast('Alteração salva'); } catch (err) { fail(err); }
     }
   });
 
@@ -974,22 +1217,31 @@
     document.querySelectorAll('.drop').forEach((n) => { if (n !== col) n.classList.remove('drop'); });
     col.classList.add('drop');
   });
-  document.addEventListener('drop', (e) => {
+  document.addEventListener('drop', async (e) => {
     const col = e.target.closest && e.target.closest('[data-drop]');
     if (!col || !dragId) return;
     e.preventDefault();
     const id = dragId;
-    if (moveStage(id, col.dataset.drop)) toast(`${id} → ${stageLabel(col.dataset.drop)}`);
-    render();
+    document.querySelectorAll('.drop').forEach((n) => n.classList.remove('drop'));
+    if (await moveStage(id, col.dataset.drop)) toast(`${code(content(id))} → ${stageLabel(col.dataset.drop)}`);
   });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeLayer();
-    if (e.key === 'Enter' && e.target.matches('.kpi, .row')) e.target.click();
+    if (e.key === 'Enter' && e.target.matches('.kpi, .row, .qitem, .kcard')) e.target.click();
+    if (e.key === 'Enter' && e.target.id === 'd-comment') { const b = document.querySelector('[data-act="d-comment"]'); if (b) b.click(); }
   });
 
   window.addEventListener('hashchange', () => { ui.navOpen = false; closeLayer(); render(); window.scrollTo(0, 0); });
 
-  if (state.profile === 'cliente') location.hash = '#/portal';
+  // Vira o dia sem recarregar (prazos "hoje"/"atrasado" continuam certos).
+  setInterval(() => { const t = startOfDay(new Date()); if (t - TODAY) { TODAY = t; if (S.status === 'app') render(); } }, 60000);
+
   render();
+  if (window.VH !== undefined) start();
+  else {
+    window.addEventListener('vh:ready', start);
+    // Se o módulo do Firebase não carregar (sem internet / bloqueado), avisa em vez de ficar carregando.
+    setTimeout(() => { if (!start.done) { S.status = window.VINDEX_FIREBASE_CONFIG ? 'offline' : 'config'; start.done = true; render(); } }, 10000);
+  }
 })();

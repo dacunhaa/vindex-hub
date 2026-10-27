@@ -1,5 +1,15 @@
 # Vindex Hub — Arquitetura e plano de implementação
 
+> **Atualização (outubro de 2026) — versão 1 em uso.** Para começar a usar já, sem esperar o plano completo abaixo, o Hub foi ligado ao **Firebase** (Google):
+> - **Login:** "Entrar com Google". Só entra quem estiver na coleção `usuarios` (documento = e-mail) com `ativo = true`.
+> - **Banco:** Cloud Firestore (São Paulo), coleções `usuarios`, `conteudos`, `tarefas` e `biblioteca`, com atualização em tempo real.
+> - **Permissões no banco:** arquivo `firestore.rules`. Só a CEO muda um conteúdo para "aprovado"; clientes só leem itens publicados da biblioteca; equipe e CEO veem a operação.
+> - **Site:** estático no GitHub Pages, sem build. A configuração do Firebase em `assets/js/firebase-config.js` é pública por natureza (não é senha); a proteção está nas regras.
+> - **Vídeos:** por link (Google Drive ou YouTube não listado). O upload direto de arquivos (Firebase Storage) exige o plano pago Blaze e ficou para uma próxima fase.
+> - **Ainda não existe:** notificações por e-mail, separação da biblioteca por cliente, histórico de versões de arquivo, backups automáticos (plano Blaze).
+>
+> O restante deste documento é o plano original, que continua válido para a evolução (Next.js + Supabase, ou seguir no Firebase com o plano Blaze).
+
 Este documento explica **o que existe hoje** (o protótipo) e **o que precisa ser construído** para o Vindex Hub virar um sistema real, com login, banco de dados, upload de vídeos, aprovações registradas e uma área de clientes segura.
 
 ---

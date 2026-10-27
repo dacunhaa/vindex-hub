@@ -1,53 +1,40 @@
-# Vindex Hub — protótipo
+# Vindex Hub
 
-Centro de operações de marketing e conteúdo da Vindex. Esta versão é um **protótipo navegável com dados fictícios**: dá para clicar em tudo, mas não há login, banco de dados nem upload real. O plano para virar sistema de verdade está em [ARQUITETURA.md](ARQUITETURA.md).
+Centro de operações de marketing e conteúdo da Vindex: produção (Kanban), aprovação da CEO, calendário editorial, tarefas e área de clientes.
 
-## Como abrir (Windows)
+**Endereço:** https://dacunhaa.github.io/vindex-hub/
+**Demonstração com dados fictícios:** https://dacunhaa.github.io/vindex-hub/demo/
 
-1. Abra a pasta `vindex-hub`.
-2. Dê **dois cliques** em `iniciar.bat`.
-3. Vai abrir uma janela preta e, em seguida, o navegador em `http://localhost:8080`.
-4. **Deixe a janela preta aberta** enquanto usa o Hub. Para encerrar, é só fechar essa janela.
+## Como entrar
 
-Se o navegador não abrir sozinho, digite `localhost:8080` na barra de endereço.
+1. Abra o endereço acima.
+2. Clique em **Entrar com Google**.
+3. Use exatamente o e-mail que foi cadastrado na tela **Acessos**.
 
-> Precisa ter o Python instalado (já está neste computador). Abrir o `index.html` direto com dois cliques também funciona, mas pelo `iniciar.bat` é o jeito recomendado.
+Quem não está cadastrado vê a mensagem "Acesso não liberado".
 
-## O que tem em cada tela
+## Perfis
 
-| Tela | Para que serve |
+| Perfil | Pode |
 |---|---|
-| **Dashboard** | Resumo do dia: produção da semana, pendências, tarefas atrasadas, aprovações e próximos prazos |
-| **Produção** | Kanban com as 10 etapas (Pauta → Publicado). Arraste os cards ou clique para editar |
-| **Central de aprovação** | Ver roteiro e vídeo, comentar, aprovar ou pedir ajustes |
-| **Calendário editorial** | Conteúdos por data de publicação, em visão de mês ou lista |
-| **Tarefas** | Responsável, prazo, prioridade, status e o marcador "Depende da CEO" |
-| **Área de clientes** | Como o cliente vê a biblioteca de vídeos e materiais |
+| **CEO** | Ver tudo, aprovar ou pedir ajustes, comentar, gerenciar acessos |
+| **Administrador** | Tudo da equipe + gerenciar acessos |
+| **Equipe** | Criar e mover conteúdos, tarefas e itens da biblioteca, comentar |
+| **Cliente** | Só a área do cliente: vídeos e materiais marcados como publicados |
 
-## Dicas para a apresentação
+## Como dar acesso a alguém (equipe ou cliente)
 
-- No topo, **Visualizar como** troca entre **Equipe**, **CEO** e **Cliente**. Isso é só demonstração, não é login.
-- Para mostrar uma aprovação: mude para **CEO**, abra a **Central de aprovação** e clique em **Aprovar**. O primeiro conteúdo da fila tem o vídeo institucional da Vindex.
-- Como **Equipe**, o botão de aprovar fica bloqueado: só a CEO aprova.
-- Como **Cliente**, a tela muda inteira: o cliente não vê nada da operação interna.
-- Clique na etiqueta amarela **Protótipo · dados fictícios** para ver o que é real e para **restaurar os dados de exemplo** depois de testar.
+1. Entre como CEO ou Administrador.
+2. Menu **Acessos** → **Adicionar pessoa**.
+3. Preencha nome, e-mail da conta Google e perfil → **Liberar acesso**.
+4. Mande o endereço do Hub para a pessoa. Ela entra com "Entrar com Google".
 
-## O que é real e o que não é
+Para tirar o acesso: botão **Bloquear** na mesma tela.
 
-- As alterações (mover cards, aprovar, comentar, criar tarefas) ficam salvas **só no navegador onde foram feitas**. Outra pessoa não vê.
-- Todos os nomes, empresas e números são **fictícios**.
-- Não há nenhuma senha ou chave secreta no código.
+## Vídeos
 
-## Arquivos
+Por enquanto o Hub não guarda arquivos de vídeo. Suba o vídeo no **Google Drive** (compartilhado como "Qualquer pessoa com o link") ou no **YouTube como "não listado"** e cole o link no campo **Link do vídeo** do conteúdo. Ele toca dentro do Hub.
 
-```
-vindex-hub/
-  index.html            página principal
-  iniciar.bat           abre o Hub no navegador
-  ARQUITETURA.md        arquitetura e plano para o sistema real
-  assets/css/app.css    visual (cores, fontes, componentes)
-  assets/js/data.js     dados fictícios
-  assets/js/app.js      telas e interações
-  assets/img/           logos da Vindex
-  assets/media/         vídeo institucional usado como exemplo
-```
+## Onde ficam os dados
+
+No Firebase (Google), projeto **vindex-hub**, conta danyellevieiracc04@gmail.com. As regras de segurança estão no arquivo `firestore.rules` e também publicadas no Firebase. Detalhes técnicos em [ARQUITETURA.md](ARQUITETURA.md).

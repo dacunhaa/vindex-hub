@@ -1,0 +1,51 @@
+rules_version = '2';
+
+// Vindex Hub — regras de segurança do banco.
+// Só entra quem está na coleção "usuarios" (documento = e-mail em minúsculas) com ativo = true.
+// Clientes só leem a biblioteca publicada. Só a CEO aprova conteúdos.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+    function myDoc() {
+      return /databases/$(database)/documents/usuarios/$(myEmail());
+    }
+    function hasRole(roles) {
+      return signedIn() && exists(myDoc())
+        && get(myDoc()).data.ativo == true
+        && get(myDoc()).data.papel in roles;
+    }
+    function internal() {
+      return hasRole(['admin', 'ceo', 'equipe']);
+    }
+
+    match /usuarios/{email} {
+      allow read: if (signedIn() && email == myEmail()) || internal();
+      allow write: if hasRole(['admin', 'ceo']);
+    }
+
+    match /conteudos/{id} {
+      allow read: if internal();
+      allow create, delete: if hasRole(['admin', 'equipe']);
+      // Mudar a etapa para "aprovado" é exclusivo da CEO.
+      allow update: if internal()
+        && (request.resource.data.stage != 'aprovado'
+            || resource.data.stage == 'aprovado'
+            || hasRole(['ceo']));
+    }
+
+    match /tarefas/{id} {
+      allow read, write: if internal();
+    }
+
+    match /biblioteca/{id} {
+      allow read: if internal() || (hasRole(['cliente']) && resource.data.publicado == true);
+      allow write: if hasRole(['admin', 'equipe']);
+    }
+  }
+}
