@@ -5,7 +5,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {
-  getFirestore, collection, doc, onSnapshot, addDoc, setDoc, updateDoc, deleteDoc, getDoc, getDocs, arrayUnion, query, where
+  getFirestore, collection, doc, onSnapshot, addDoc, setDoc, updateDoc, deleteDoc, getDoc, getDocs, arrayUnion, query, where, runTransaction
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
 const cfg = window.VINDEX_FIREBASE_CONFIG;
@@ -38,6 +38,17 @@ if (!cfg) {
     set: (col, id, data) => setDoc(doc(db, col, id), data),
     update: (col, id, patch) => updateDoc(doc(db, col, id), patch),
     remove: (col, id) => deleteDoc(doc(db, col, id)),
+    // Adia para "hoje" um conteúdo cuja data de publicação passou sem ser publicado.
+    // Em transação: se duas pessoas abrirem o Hub juntas, só uma grava.
+    reschedule: (id, today, entry) => runTransaction(db, async (tx) => {
+      const ref = doc(db, 'conteudos', id);
+      const s = await tx.get(ref);
+      if (!s.exists()) return null;
+      const d = s.data();
+      if (!d.publish || d.publish >= today || d.stage === 'publicado') return null;
+      tx.update(ref, { publish: today, adiado: (d.adiado || 0) + 1, adiadoDe: d.adiadoDe || d.publish, history: arrayUnion(entry(d.publish)) });
+      return d.publish;
+    }),
     push: (col, id, field, item, patch = {}) => updateDoc(doc(db, col, id), { ...patch, [field]: arrayUnion(item) })
   };
 }

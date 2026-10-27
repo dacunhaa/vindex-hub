@@ -648,3 +648,7 @@ select.mini { border: 1px solid var(--line); border-radius: 7px; padding: 4px 6p
 .undated-h .muted { font-size: 12.5px; }
 .undated-l { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .undated-l .ev { max-width: 320px; }
+
+/* Conteúdo adiado automaticamente (passou a data sem ser publicado) */
+.ev .adiado { flex: 0 0 auto; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 1px 4px; border-radius: 4px; background: #FFF4D6; color: #8A5A00; }
+.badge.adiado-b { background: #FFF4D6; color: #8A5A00; border-color: #F2DFA6; }

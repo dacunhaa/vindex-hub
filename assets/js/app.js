@@ -173,6 +173,21 @@
     try { await VH.push('conteudos', id, 'history', H(`Movido para ${stageLabel(stage)}`), patch); return true; } catch (e) { fail(e); return false; }
   }
 
+  // Regra do calendário: passou a data e não foi marcado como publicado → vai para hoje.
+  // Roda no navegador de quem estiver com o Hub aberto (sem servidor no plano gratuito).
+  const rescheduling = new Set();
+  function autoReschedule() {
+    if (!['admin', 'ceo', 'equipe'].includes(role())) return;
+    const today = iso(new Date());
+    const ddmm = (s) => { const d = parse(s); return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}`; };
+    S.contents.filter((c) => c.publish && c.publish < today && c.stage !== 'publicado' && !rescheduling.has(c.id)).forEach((c) => {
+      rescheduling.add(c.id);
+      VH.reschedule(c.id, today, (from) => ({ at: nowIso(), by: myEmail(), text: `Reagendado automaticamente de ${ddmm(from)} para ${ddmm(today)} (não foi marcado como publicado)` }))
+        .catch((e) => console.error(e))
+        .finally(() => rescheduling.delete(c.id));
+    });
+  }
+
   async function decide(id, decision, text) {
     const c = content(id);
     const comment = { at: nowIso(), by: myEmail(), text: text || 'Aprovado.', decision };
@@ -604,7 +619,7 @@
                 </div>
                 ${isCEO() ? '' : `<div class="lock">${I.lock.replace('<svg', '<svg width="13" height="13" style="vertical-align:-2px"')} Só a CEO aprova ou pede ajustes.</div>`}`
               : c.stage === 'ajustes' ? `<p>A CEO pediu ajustes. Quando a nova versão estiver pronta, reenvie.</p>${canEditContent() ? `<button class="btn primary" style="width:100%" data-act="resubmit" data-id="${c.id}">Reenviar para aprovação (v${(c.version || 1) + 1})</button>` : ''}`
-              : `<p>Este conteúdo já foi aprovado.</p>${c.stage === 'aprovado' && canEditContent() ? `<button class="btn dark" style="width:100%" data-act="schedule" data-id="${c.id}">Marcar como agendado</button>` : stageBadge(c.stage)}`}
+              : `<p>Este conteúdo já foi aprovado.</p>${c.stage === 'aprovado' && canEditContent() ? `<button class="btn dark" style="width:100%" data-act="schedule" data-id="${c.id}">Marcar como agendado</button>` : stageBadge(c.stage)}${c.stage !== 'publicado' && (canEditContent() || isCEO()) ? `<button class="btn" style="width:100%;margin-top:8px" data-act="mark-published" data-id="${c.id}">${I.check}Marcar como publicado</button>` : ''}`}
             </div>
             <div>
               <p class="section-t">Comentários (${(c.comments || []).length})</p>
@@ -625,7 +640,7 @@
     const f = ui.cal;
     return S.contents.filter((c) => c.publish && (!f.owner || c.owner === f.owner) && (!f.format || c.format === f.format) && (!f.stage || c.stage === f.stage));
   }
-  const evHTML = (c) => `<div class="ev st st-${c.stage}" data-act="content" data-id="${c.id}" title="${esc(c.title)} · ${esc(c.format)} · ${esc(stageLabel(c.stage))} · ${esc(person(c.owner).name)}">${avatar(c.owner, 'av')}<span>${esc(c.format)} · ${esc(c.title)}</span></div>`;
+  const evHTML = (c) => `<div class="ev st st-${c.stage}" data-act="content" data-id="${c.id}" title="${esc(c.title)} · ${esc(c.format)} · ${esc(stageLabel(c.stage))} · ${esc(person(c.owner).name)}${c.adiado ? ` · adiado (era ${fmt(c.adiadoDe)})` : ''}">${avatar(c.owner, 'av')}${c.adiado ? '<b class="adiado">adiado</b>' : ''}<span>${esc(c.format)} · ${esc(c.title)}</span></div>`;
 
   // Conteúdos sem data de publicação: ficam visíveis no topo do calendário até alguém marcar a data.
   function undatedHTML() {
@@ -845,12 +860,13 @@
     openLayer(`<aside class="drawer" role="dialog" aria-label="${esc(c.title)}">
       <div class="drawer-h"><div style="min-width:0;flex:1"><div class="mono muted" style="font-size:11.5px">${code(c)} · versão ${c.version || 1}</div>
         ${ed ? `<input class="input title-input" data-content-field="title" data-id="${c.id}" value="${esc(c.title)}" aria-label="Título">` : `<h2>${esc(c.title)}</h2>`}
-        <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">${stageBadge(c.stage)}<span class="badge fmt">${esc(c.format)}</span>${contentLate(c) ? `<span class="badge late">Atrasado ${-diff(c.due)}d</span>` : ''}</div></div>
+        <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">${stageBadge(c.stage)}<span class="badge fmt">${esc(c.format)}</span>${contentLate(c) ? `<span class="badge late">Atrasado ${-diff(c.due)}d</span>` : ''}${c.adiado ? `<span class="badge adiado-b">Adiado ${c.adiado}x · era ${fmt(c.adiadoDe)}</span>` : ''}</div></div>
         <button class="x" data-act="close" aria-label="Fechar">${I.x}</button></div>
       <div class="drawer-b">
         <div style="background:var(--blue-50);border-radius:10px;padding:12px 14px;display:flex;align-items:center;gap:12px">
           <div style="flex:1"><div class="section-t" style="margin:0 0 3px;color:var(--blue-600)">Próximo passo</div><b>${esc(NEXT_STEP[c.stage])}</b></div>${who(nextOwner(c))}
         </div>
+        ${c.stage !== 'publicado' && (ed || isCEO()) ? `<button class="btn primary" style="width:100%" data-act="mark-published" data-id="${c.id}">${I.check}Marcar como publicado</button>` : ''}
         <dl class="props">
           <dt>Etapa</dt><dd><select class="input" data-content-field="stage" data-id="${c.id}" ${ed || isCEO() ? '' : 'disabled'}>${options(K.STAGES.map((s) => ({ value: s.id, label: s.label })), c.stage)}</select></dd>
           <dt>Responsável</dt><dd><select class="input" data-content-field="owner" data-id="${c.id}" ${dis}>${peopleOpts(c.owner, 'Sem responsável')}</select></dd>
@@ -1046,10 +1062,12 @@
   /* ---------------- Sessão e dados ---------------- */
   function stopWatching() { S.unsubs.forEach((u) => u()); S.unsubs = []; }
 
+  setInterval(() => { if (S.status === 'app') autoReschedule(); }, 10 * 60 * 1000);
+
   function watchAll() {
     stopWatching();
     const onErr = (e) => { console.error(e); toast('Sem permissão para ler alguns dados', 'regra de acesso'); };
-    const sub = (col, key, filter) => S.unsubs.push(VH.watch(col, (rows) => { S[key] = rows; scheduleRender(); }, onErr, filter));
+    const sub = (col, key, filter) => S.unsubs.push(VH.watch(col, (rows) => { S[key] = rows; if (key === 'contents') autoReschedule(); scheduleRender(); }, onErr, filter));
     if (role() === 'cliente') {
       sub('biblioteca', 'library', ['publicado', true]);
       return;
@@ -1240,6 +1258,7 @@
       }
       case 'resubmit': if (await moveStage(id, 'aguardando_aprovacao')) { ui.approval.tab = 'aguardando'; ui.approval.selected = id; toast('Reenviado para aprovação'); } break;
       case 'schedule': if (await moveStage(id, 'agendado')) toast('Marcado como agendado'); break;
+      case 'mark-published': if (await moveStage(id, 'publicado')) { toast('Marcado como publicado'); if (document.getElementById('layer')) openContent(id); } break;
       case 'comment': {
         const box = document.getElementById('ap-comment');
         const txt = box.value.trim();
@@ -1321,7 +1340,9 @@
       if (field === 'title') { value = value.trim(); if (!value) { t.value = c.title; return; } }
       if (field === 'video' && value && !safeUrl(value)) { toast('Link inválido', 'use um endereço que começa com https://'); t.value = c.video || ''; return; }
       const labels = { title: 'Título alterado', owner: `Responsável: ${person(value).name}`, due: `Prazo: ${fmt(value)}`, publish: `Publicação: ${fmt(value)}`, format: `Formato: ${value}`, channel: `Canal: ${value}`, pillar: `Pilar: ${value || '—'}`, video: value ? 'Link do vídeo atualizado' : 'Link do vídeo removido' };
-      try { await VH.push('conteudos', c.id, 'history', H(labels[field] || 'Alterado'), { [field]: value }); toast('Alteração salva'); } catch (err) { fail(err); }
+      const patch = { [field]: value };
+      if (field === 'publish') { patch.adiado = 0; patch.adiadoDe = ''; }
+      try { await VH.push('conteudos', c.id, 'history', H(labels[field] || 'Alterado'), patch); toast('Alteração salva'); } catch (err) { fail(err); }
     }
   });
 
