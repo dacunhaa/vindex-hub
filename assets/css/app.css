@@ -640,3 +640,11 @@ select.mini { border: 1px solid var(--line); border-radius: 7px; padding: 4px 6p
 @media (max-width: 640px) { .gallery img { height: 260px; } }
 .review-main .gallery figure { flex: 0 0 min(100%, 420px); }
 .review-main .gallery img { width: 100%; height: auto; max-height: 560px; max-width: none; }
+
+/* Conteúdos sem data de publicação, no topo do calendário */
+.undated { padding: 12px 14px; margin-bottom: 14px; border-left: 3px solid var(--warn, #E5A50A); }
+.undated-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.undated-h svg { width: 16px; height: 16px; color: var(--warn, #E5A50A); }
+.undated-h .muted { font-size: 12.5px; }
+.undated-l { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.undated-l .ev { max-width: 320px; }

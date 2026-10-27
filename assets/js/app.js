@@ -627,6 +627,15 @@
   }
   const evHTML = (c) => `<div class="ev st st-${c.stage}" data-act="content" data-id="${c.id}" title="${esc(c.title)} · ${esc(c.format)} · ${esc(stageLabel(c.stage))} · ${esc(person(c.owner).name)}">${avatar(c.owner, 'av')}<span>${esc(c.format)} · ${esc(c.title)}</span></div>`;
 
+  // Conteúdos sem data de publicação: ficam visíveis no topo do calendário até alguém marcar a data.
+  function undatedHTML() {
+    const f = ui.cal;
+    const list = S.contents.filter((c) => !c.publish && c.stage !== 'publicado' && (!f.owner || c.owner === f.owner) && (!f.format || c.format === f.format) && (!f.stage || c.stage === f.stage));
+    if (!list.length) return '';
+    return `<div class="card undated"><div class="undated-h">${I.alert}<b>Sem data de publicação (${list.length})</b><span class="muted">Abra o conteúdo e preencha <b>Publicação</b> para ele entrar no calendário.</span></div>
+      <div class="undated-l">${list.map(evHTML).join('')}</div></div>`;
+  }
+
   function pageCalendar() {
     const f = ui.cal;
     const list = calFiltered();
@@ -664,6 +673,7 @@
       <select class="input" data-filter="cal.stage">${options(K.STAGES.map((s) => ({ value: s.id, label: s.label })), f.stage, 'Todos os status')}</select>
       <span class="result">${monthList.length} no mês</span>
     </div>
+    ${undatedHTML()}
     ${f.view === 'mes' ? grid : listView}
     <div class="cal-legend">${K.STAGES.map((s) => `<span class="st st-${s.id}"><i></i>${esc(s.label)}</span>`).join('')}</div>`;
   }
@@ -887,7 +897,7 @@
         <div class="field"><label>Responsável</label><select class="input" name="owner">${peopleOpts(myEmail())}</select></div>
         <div class="field"><label>Etapa</label><select class="input" name="stage">${options(K.STAGES.filter((s) => s.id !== 'aprovado').map((s) => ({ value: s.id, label: s.label })), 'pauta')}</select></div>
         <div class="field"><label>Prazo da etapa</label><input class="input" type="date" name="due" value="${offset(3)}"></div>
-        <div class="field"><label>Publicação prevista</label><input class="input" type="date" name="publish" value="${offset(7)}"></div>
+        <div class="field"><label>Publicação prevista</label><input class="input" type="date" name="publish" value="${offset(7)}" required></div>
         <div class="field full"><label>Pilar</label><select class="input" name="pillar">${options(K.PILLARS, 'Lucro', '—')}</select></div>
       </form>
       <div class="drawer-f"><button class="btn" data-act="close">Cancelar</button><button class="btn primary" data-act="save-content">Criar conteúdo</button></div>
